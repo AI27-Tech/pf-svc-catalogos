@@ -1,5 +1,15 @@
 # CHANGELOG
 
+## 2026:10:06 12:55
+
+**Resumen:** Se reemplazó la plantilla de Pull Request (venía copiada del frontend) por una adaptada al stack Go de AI27.
+
+**Cambios:**
+- Se reescribió `.github/pull_request_template.md`: la anterior era la del portal-cliente (comandos pnpm, invariantes de UI, librerías prohibidas de frontend), que no aplica a un repo Go. La nueva cubre invariantes de arquitectura (I1-I5, contrato primero), base de datos, eventos/bus, verificación (go build/vet/test, arch-test, gofmt), CHANGELOG y convenciones.
+
+**Archivos modificados:**
+- `.github/pull_request_template.md`
+
 ## 2026:10:06 11:45
 
 **Resumen:** Se corrigió el workflow de CI para autenticar siempre contra los repos privados de la organización.
