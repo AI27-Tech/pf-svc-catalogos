@@ -1,5 +1,17 @@
 # CHANGELOG
 
+## 2026:10:07 16:25
+
+**Resumen:** Se exporta `PresupuestoRevocacion` para la arista restringida a `identidad` (RevocacionPort), por la obligación I3. Brecha detectada al cablear el prompt 09: el adaptador EN PROCESO de `pf-svc-core` para la revocación no tenía de dónde leer el presupuesto, porque el consumidor no lo exportaba.
+
+**Cambios:**
+- `catalogos.go`: se agrega `PresupuestoRevocacion` (`2 * time.Second`) exportado, junto al puerto `RevocacionPort`. `core` lo lee de aquí para el adaptador en proceso, en vez de duplicar el número (I3, ADR 17). El comentario distingue este presupuesto (una llamada puntual) del umbral de frescura del canal (15 s / 30 s, ADR 26). Se agrega el import de `time`.
+
+**Verificado:** gofmt limpio, `go vet ./...`, `go build ./...`, `go test ./...`, build `-mod=readonly`, arch-test@v0.1.1 OK.
+
+**Archivos modificados:**
+- `catalogos.go`
+
 ## 2026:10:06 12:55
 
 **Resumen:** Se reemplazó la plantilla de Pull Request (venía copiada del frontend) por una adaptada al stack Go de AI27.
