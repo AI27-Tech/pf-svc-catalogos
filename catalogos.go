@@ -112,19 +112,20 @@ func (m *Module) Consultas() ConsultasAPI {
 // 1:1 a un operationId presente en catalogos.yaml de la versión fijada; no hay
 // métodos sin operación contractual (00 regla 6).
 //
-// Hoy expone solo lo que el contrato tracer.3 ya tiene: lectura de clientes,
-// contrato y SLA, y lectura + aptitud de custodios y "unidades" (el átomo
-// vehículo todavía se llama Unidad en el contrato; su rename es la brecha C3).
-// Las lecturas por lote (C4/C5) y a una fecha de átomos (C9) NO están en el
-// contrato: no se agregan aquí.
+// Hoy expone solo lo que el contrato ya tiene: lectura de clientes, contrato y
+// SLA, y lectura + aptitud de custodios y vehículos. Las lecturas por lote
+// (C4/C5) y a una fecha de átomos (C9) NO están en el contrato: no se agregan
+// aquí. C3 resuelta en tracer.4: el átomo es `Vehiculo` (ADR 31 §5), no `Unidad`,
+// y la aptitud se evalúa contra el contrato/SLA de un cliente (de ahí `clienteID`).
 type ConsultasAPI interface {
 	ObtenerCliente(ctx context.Context, id catclient.Id) (*catclient.Cliente, error)
 	ObtenerContrato(ctx context.Context, id catclient.Id, aFecha *catclient.MarcaTiempo) (*catclient.Contrato, error)
 	ObtenerSla(ctx context.Context, id catclient.Id, aFecha *catclient.MarcaTiempo) (*catclient.Sla, error)
-	// AptitudCustodio y AptitudUnidad devuelven aptitud INFORMATIVA (DEC-055):
-	// nunca gatean, y "desconocida" es un valor válido si el dato falta.
-	AptitudCustodio(ctx context.Context, id catclient.Id) (*catclient.Aptitud, error)
-	AptitudUnidad(ctx context.Context, id catclient.Id) (*catclient.Aptitud, error)
+	// AptitudVehiculo y AptitudCustodio devuelven aptitud INFORMATIVA (DEC-055):
+	// nunca gatean, y "desconocida" es un valor válido si el dato falta. clienteID
+	// acota la evaluación al contrato/SLA de ese cliente (tracer.4).
+	AptitudVehiculo(ctx context.Context, vehiculoID, clienteID catclient.Id) (*catclient.Aptitud, error)
+	AptitudCustodio(ctx context.Context, custodioID, clienteID catclient.Id) (*catclient.Aptitud, error)
 }
 
 // consultas implementa ConsultasAPI delegando en los casos de uso del módulo.
@@ -146,10 +147,10 @@ func (c *consultas) ObtenerSla(ctx context.Context, id catclient.Id, aFecha *cat
 	return nil, errNoImplementado("ObtenerSla")
 }
 
-func (c *consultas) AptitudCustodio(ctx context.Context, id catclient.Id) (*catclient.Aptitud, error) {
-	return nil, errNoImplementado("AptitudCustodio")
+func (c *consultas) AptitudVehiculo(ctx context.Context, vehiculoID, clienteID catclient.Id) (*catclient.Aptitud, error) {
+	return nil, errNoImplementado("AptitudVehiculo")
 }
 
-func (c *consultas) AptitudUnidad(ctx context.Context, id catclient.Id) (*catclient.Aptitud, error) {
-	return nil, errNoImplementado("AptitudUnidad")
+func (c *consultas) AptitudCustodio(ctx context.Context, custodioID, clienteID catclient.Id) (*catclient.Aptitud, error) {
+	return nil, errNoImplementado("AptitudCustodio")
 }
