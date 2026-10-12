@@ -8,7 +8,7 @@ go 1.27
 // identidad para revocación (DEC-051/058), que es HTTP vía cliente generado y
 // no implica requerir el módulo identidad.
 require (
-	github.com/AI27-Tech/pf-pkg-contracts/packages/api-client-go v0.1.0-tracer.3
+	github.com/AI27-Tech/pf-pkg-contracts/packages/api-client-go v0.1.0-tracer.4
 	github.com/AI27-Tech/pf-pkg-platform-go v0.1.0
 	github.com/jackc/pgx/v5 v5.11.0
 )
