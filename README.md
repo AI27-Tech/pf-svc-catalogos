@@ -6,8 +6,11 @@ custodios y catálogos de tipo—. Es una **hoja del grafo** (`catalogo -> []`):
 no llama a `operacion` ni a ningún módulo de dominio. Vive dentro del deployable
 `core`.
 
-Estado: **scaffolding inicial** (prompt `02`). El cableado y la estructura
-existen; la lógica de negocio real todavía no.
+Estado: el sub-módulo `vehiculos` está **implementado** sobre el contrato
+`v0.1.0-tracer.6` (E5-T1: lectura paginada y por lote, lectura a una fecha,
+aptitud informativa, y escritura `POST`/`PATCH` con outbox en la misma
+transacción). El resto de los sub-módulos (`clientes`, `sla`, `custodios`,
+`tipos`) siguen en scaffolding.
 
 ## Frontera (ADR 31)
 
@@ -21,10 +24,11 @@ vehículo, nunca columna ni recurso aparte.
 
 ## Superficie pública
 
-`catalogos.go` expone `New(Pools, Deps)`, `Routes`, `Workers` y `Consultas`
-(00 "Forma de un módulo"). `catalogos` es destino de aristas síncronas
-(`operacion`, `reportes`, `bff` en proceso; `mensajeria` siempre por HTTP), por
-eso expone `Consultas()`, tipada solo con tipos de `pf-pkg-contracts`.
+`catalogos.go` expone `New(Pools, Deps)`, `Routes`, `Workers`, `Consultas` y
+`Comandos` (00 "Forma de un módulo"). `catalogos` es destino de aristas
+síncronas (`operacion`, `reportes`, `bff` en proceso; `mensajeria` siempre por
+HTTP), por eso expone `Consultas()` (lectura) y `Comandos()` (escritura
+administrativa), ambas tipadas solo con tipos de `pf-pkg-contracts`.
 
 Verifica tokens y consume `sesion.revocada` por su propia suscripción durable
 (DEC-057/058), con la arista restringida a `identidad` (`listarRevocadas` +
@@ -46,26 +50,28 @@ historia ni `DELETE` en firme (P8).
 
 ## Brechas de contrato que bloquean partes del scaffold
 
-Verificado contra `pf-pkg-contracts` en `v0.1.0-tracer.3` (contrato pinned). Lo
+Verificado contra `pf-pkg-contracts` en `v0.1.0-tracer.6` (contrato pinned). Lo
 presente se implementa; lo ausente se reporta y **no se escribe a mano**
 (contrato primero, 00 regla 6).
 
-| # | Superficie | Estado en tracer.3 | Efecto |
+| # | Superficie | Estado en tracer.6 | Efecto |
 |---|---|---|---|
 | C1 | Cliente Go `api-client-go/catalogos` | ✅ presente | — |
 | C2 | Lectura de clientes, contrato, SLA | ✅ presente | implementable |
-| C11 | Aptitud de custodio y "unidad" | ✅ presente (en `unidades`) | implementable como lectura informativa |
-| C3 | Átomo **vehículo** (ADR 31) en lugar de `Unidad` (ADR 24) | ❌ falta (contrato aún en `/unidades`, modelo viejo) | **bloquea** el paquete `vehiculos`, su tabla y rutas; la aptitud se expone sobre `unidades` mientras tanto |
-| C4 | Lectura por lote de vehículos/custodios | ❌ falta | bloquea lecturas `:lote` |
+| C11 | Aptitud de custodio y vehículo | ✅ presente | lectura informativa (DEC-055) |
+| C3 | Átomo **vehículo** (ADR 31) en lugar de `Unidad` (ADR 24) | ✅ cerrada en tracer.4 | `/api/v1/vehiculos`, schema `Vehiculo`; paquete `vehiculos` implementado (E5-T1) |
+| C4 | Lectura por lote de vehículos | ✅ cerrada en tracer.5 | `GET /vehiculos?ids=...` implementado |
+| C6 | **Versión** en la respuesta de lectura | ✅ cerrada en tracer.5 | `Vehiculo.version` (opcional) implementado |
+| C7 | Superficie admin `POST`/`PATCH` de vehículos | ✅ cerrada en tracer.5 | `crearVehiculo`/`actualizarVehiculo` con outbox (P17) implementados |
+| C9 | Lectura a una fecha de vehículos | ✅ cerrada en tracer.5 | `GET /vehiculos/{id}?a_fecha=...` implementado |
 | C5 | Lectura por lote de clientes/contratos/SLA | ❌ falta | bloquea lecturas `:lote` de `bff`/`reportes`/`mensajeria` |
-| C6 | **Versión** en toda respuesta de lectura | ❌ falta en los schemas | las lecturas no exponen versión todavía |
-| C7 | Superficie admin `POST`/`PATCH` por agregado | ❌ falta | bloquea toda escritura administrativa (E5) |
 | C8 | Catálogos de tipo (tipos, líneas, GPS, zonas lista) | ❌ falta | bloquea el paquete `tipos`, sus tablas y rutas |
-| C9 | Lectura a una fecha de vehículos/custodios | ❌ falta | — |
 | C10 | `catalogo.actualizado` con **versión** | ❌ falta (proto sin campo versión) | la versión viaja en el sobre de dominio; el payload del evento se alineará cuando el contrato la agregue |
 
-C3–C10 son la **ola 1 contractual** (`tracer.4`), bloqueada además por la
-reconciliación pendiente de `catalogos.yaml` con ADR 31 (ver nota abajo).
+C3/C4/C6/C7/C9 (la superficie de vehículos de E5-T1) se cerraron en la ola de
+catálogos (`tracer.5`, publicada en `tracer.6`) y ya están implementadas. C5
+(lote de otros agregados), C8 (catálogos de tipo) y C10 (versión en el evento)
+siguen abiertas: son otras historias.
 
 ## Diferido a V2 (no se crea)
 
@@ -83,8 +89,9 @@ DEC-038); kit de seguridad y tipos de custodia (DEC-047). Los paquetes `rutas` y
 - **Documentos aún en el modelo viejo** (`catalogos.md` (d)/(e), E5-T1/T3,
   `operacion.md` (f), comentario de `catalogo.proto`): siguen diciendo "unidad"
   donde ADR 31 dice vehículo. No se editan desde este scaffold.
-- **Nombre canónico del átomo vehículo:** `vehiculos` es nombre de trabajo; se
-  fija en `pf-pkg-contracts` (C3) y en `naming-conventions.md`.
+- **Nombre canónico del átomo vehículo:** fijado como `vehiculo` en
+  `pf-pkg-contracts` (C3, tracer.4) y en `naming-conventions.md`. Ya no es nombre
+  de trabajo.
 - **LFPDPPP** (ARCO vs retención probatoria de P8 sobre `custodio`): pendiente,
   anotado en el paquete `custodios`.
 
