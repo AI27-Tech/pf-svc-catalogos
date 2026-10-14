@@ -48,11 +48,12 @@ Un solo esquema `catalogos`, un solo rol `svc_catalogos`, un solo pool
 (00 regla 4). Toda entidad se versiona por vigencia; sin `UPDATE` que pise
 historia ni `DELETE` en firme (P8).
 
-## Brechas de contrato que bloquean partes del scaffold
+## Estado de las superficies de contrato
 
 Verificado contra `pf-pkg-contracts` en `v0.1.0-tracer.6` (contrato pinned). Lo
 presente se implementa; lo ausente se reporta y **no se escribe a mano**
-(contrato primero, 00 regla 6).
+(contrato primero, 00 regla 6). La superficie de vehículos de E5-T1 ya está
+cerrada e implementada; quedan abiertas C5, C8 y C10 (otras historias).
 
 | # | Superficie | Estado en tracer.6 | Efecto |
 |---|---|---|---|
