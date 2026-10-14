@@ -1,5 +1,35 @@
 # CHANGELOG
 
+## 2026:10:13 (E5-T1 — superficie de vehículos sobre tracer.6)
+
+**Resumen:** Se implementa la superficie completa del sub-módulo `vehiculos` (E5-T1 / AI27-73) sobre el contrato `v0.1.0-tracer.6`, que cerró las brechas C3/C4/C6/C7/C9 de catálogos. Lectura paginada y por lote, lectura vigente o a una fecha con `version`, aptitud informativa, y escritura administrativa `POST`/`PATCH` que versiona por vigencia (no sobrescribe, P8) y emite `catalogo.actualizado` en la misma transacción (P17).
+
+**Cambios:**
+- `go.mod`: pin de `api-client-go` subido a `v0.1.0-tracer.6` (sin `replace` local).
+- `migrations/catalogos/0003_vehiculo.sql` y `0004_vehiculo_grants.sql`: tablas `vehiculo` y `vehiculo_documento` versionadas por vigencia (PK `(id, version)`, índice único parcial por vigencia, índice `(cliente_id, estado)` y por vigencia de documento), con grants de privilegio mínimo (SELECT/INSERT, UPDATE solo de `vigente_hasta`, sin DELETE).
+- `internal/vehiculos/vehiculos.go`: repositorio con `Listar` (cursor), `ListarPorLote` (C4), `Obtener` (vigente o a una fecha, C9), `Aptitud` (informativa, DEC-055), `Crear` y `Actualizar` (C7) con `pgx.BeginFunc` + outbox en la misma tx (P17). `escanearVehiculos` mapea `version` y vigencia (C6). Las columnas de BD son `vigente_desde`/`vigente_hasta`; el contrato las expone como `vigencia_*`.
+- `catalogos.go`: `ConsultasAPI` ampliada (`ListarVehiculosPorLote`, `ObtenerVehiculo`); nueva `ComandosAPI` (`CrearVehiculo`, `ActualizarVehiculo`) expuesta por `Comandos()`; `Routes()` monta `GET /vehiculos` (con `?ids` para lote, excluyente con `cursor`), `POST /vehiculos`, `GET /vehiculos/{id}` (con `?a_fecha`), `PATCH /vehiculos/{id}` y la aptitud; helpers `parsearIDs` y `parsearAFecha`. Traducción de `ErrNoEncontrado` a 404 (I3).
+- `internal/vehiculos/vehiculos_test.go`: 4 pruebas unitarias de aptitud (fake de `pgx.Row`).
+- `internal/vehiculos/vehiculos_integracion_test.go` (nuevo): integración contra Postgres — `TestCrear_EmiteEventoEnLaMismaTx` (P17), `TestActualizar_CreaNuevaVersionSinSobrescribir` (P8/C9), `TestListarPorLote` (C4). Se saltan sin `CATALOGOS_TEST_DB`.
+- `migrations/grants_integration_test.go`: aserciones de la tabla `vehiculo`.
+- `README.md`, `internal/vehiculos/doc.go`, `migrations/catalogos/0003_vehiculo.sql`: documentación actualizada a `tracer.6` (brechas C3/C4/C6/C7/C9 cerradas e implementadas).
+
+**Verificado:** `go build ./...`, `go vet ./...`, `gofmt` limpio en archivos nuevos, `arch-test@v0.1.1` OK (catalogos sigue hoja). Pruebas de integración ejecutadas contra Postgres 16 real (Docker): 7/7 de `vehiculos` + `TestGrants` en verde. Un bug de nombre de columna (`vigencia_desde` vs `vigente_desde`) se detectó y corrigió gracias a esas pruebas.
+
+**Pendiente:** C5, C8 y C10 siguen abiertas (otras historias). `cmd/api` aún no aplica migraciones al arrancar (TODO).
+
+**Archivos modificados:**
+- `go.mod`, `go.sum`
+- `catalogos.go`
+- `internal/vehiculos/doc.go`
+- `internal/vehiculos/vehiculos.go`
+- `internal/vehiculos/vehiculos_test.go`
+- `internal/vehiculos/vehiculos_integracion_test.go`
+- `migrations/catalogos/0003_vehiculo.sql`
+- `migrations/catalogos/0004_vehiculo_grants.sql`
+- `migrations/grants_integration_test.go`
+- `README.md`
+
 ## 2026:10:07 16:25
 
 **Resumen:** Se exporta `PresupuestoRevocacion` para la arista restringida a `identidad` (RevocacionPort), por la obligación I3. Brecha detectada al cablear el prompt 09: el adaptador EN PROCESO de `pf-svc-core` para la revocación no tenía de dónde leer el presupuesto, porque el consumidor no lo exportaba.

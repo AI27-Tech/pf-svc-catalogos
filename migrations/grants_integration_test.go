@@ -82,6 +82,18 @@ func TestGrants(t *testing.T) {
 		`INSERT INTO catalogos.custodio (id, version, nombre, estado) VALUES (gen_random_uuid(), 1, 'n', 'activo')`,
 		"svc_catalogos debe poder insertar una versión de custodio")
 
+	// Vehículo (0003/0004): mismo patrón de versionado por vigencia (P8).
+	vehiculoID := "33333333-3333-3333-3333-333333333333"
+	mustExec(t, ctx, pool,
+		fmt.Sprintf(`INSERT INTO catalogos.vehiculo (id, version, tipo, estado, cliente_id) VALUES ('%s', 1, 'coche', 'activa', '%s')`, vehiculoID, clienteID),
+		"svc_catalogos debe poder insertar una versión de vehículo")
+	mustExec(t, ctx, pool,
+		fmt.Sprintf(`UPDATE catalogos.vehiculo SET vigente_hasta = now() WHERE id = '%s' AND version = 1`, vehiculoID),
+		"svc_catalogos debe poder cerrar la vigencia de un vehículo")
+	mustExec(t, ctx, pool,
+		`INSERT INTO catalogos.vehiculo_documento (id, version, vehiculo_id, clase) VALUES (gen_random_uuid(), 1, '33333333-3333-3333-3333-333333333333', 'poliza')`,
+		"svc_catalogos debe poder insertar un documento de vehículo")
+
 	// Publicar catalogo.actualizado con el publicador real, en una tx.
 	inTx(t, ctx, pool, "svc_catalogos debe poder publicar en su outbox", func(tx pgx.Tx) error {
 		return outbox.NewPublisher().Publish(ctx, tx, outbox.Event{
@@ -107,6 +119,14 @@ func TestGrants(t *testing.T) {
 		{`DELETE FROM catalogos.contrato`, "permission denied for table contrato", "no se borra un contrato"},
 		{`DELETE FROM catalogos.sla`, "permission denied for table sla", "no se borra un SLA"},
 		{`DELETE FROM catalogos.custodio`, "permission denied for table custodio", "no se borra un custodio"},
+		{`DELETE FROM catalogos.vehiculo`, "permission denied for table vehiculo",
+			"no se borra en firme una versión de vehículo (P8)"},
+		{`UPDATE catalogos.vehiculo SET placas = 'x'`, "permission denied for table vehiculo",
+			"no se reescribe una versión de vehículo: solo se cierra su vigencia (P8)"},
+		{`DELETE FROM catalogos.vehiculo_documento`, "permission denied for table vehiculo_documento",
+			"no se borra en firme un documento de vehículo (P8)"},
+		{`UPDATE catalogos.vehiculo_documento SET clase = 'x'`, "permission denied for table vehiculo_documento",
+			"no se reescribe un documento: solo se cierra su vigencia (P8)"},
 		{`DELETE FROM catalogos.outbox`, "permission denied for table outbox", "no se borra el outbox"},
 		{`UPDATE catalogos.inbox_evento SET tipo = 'x'`, "permission denied for table inbox_evento",
 			"el inbox no se reescribe"},
