@@ -1,5 +1,37 @@
 # CHANGELOG
 
+## 2026:10:15 (E5-T2 — superficie de custodios sobre tracer.8)
+
+**Resumen:** Se implementa la superficie completa del sub-módulo `custodios` (E5-T2 / AI27-74) sobre el contrato `v0.1.0-tracer.8`, espejando la vertical de vehículos de E5-T1. Lectura paginada y por lote, lectura vigente o a una fecha con `version`, aptitud informativa, y escritura administrativa `POST`/`PATCH` que versiona por vigencia (no sobrescribe, P8) y emite `catalogo.actualizado` en la misma transacción (P17). El custodio referencia al usuario de `identidad` por identificador (`usuario_id`), nunca por FK entre schemas (P1).
+
+**Cambios:**
+- `go.mod`: pin de `api-client-go` subido de `v0.1.0-tracer.6` a `v0.1.0-tracer.8`. El cliente publicado de tracer.6 no traía la superficie de escritura de custodios (sin `CustodioEntrada`/`CustodioCambios` ni `version`/`usuario_id`/vigencias en `Custodio`); tracer.8 la publica. Sin `replace` local.
+- `migrations/catalogos/0005_custodio_cols.sql` (nuevo): `ALTER TABLE catalogos.custodio ADD COLUMN telefono TEXT`. La tabla `custodio` ya existía desde `0001` (versionada por vigencia) y sus grants desde `0002`; esta migración solo agrega el atributo de contacto que el contrato expone. No requiere fase de grants nueva: `0002` otorga SELECT/INSERT (nivel tabla) y UPDATE solo de `vigente_hasta` sobre `custodio`.
+- `internal/custodios/custodios.go` (nuevo): repositorio con `Listar` (cursor), `ListarPorLote` (C4), `Obtener` (vigente o a una fecha, C9), `Aptitud` (informativa por `estado`, DEC-055), `Crear` y `Actualizar` (C7) con `pgx.BeginFunc` + outbox en la misma tx (P17, `Entidad: "custodio"`). `escanearCustodios` mapea `version` y vigencia (C6); helper `textoUUID` para el `usuario_id` TEXT↔UUID. A diferencia de vehículo: sin `cliente_id`, enums `activo`/`inactivo`, y la aptitud no evalúa documentos (no existe tabla).
+- `catalogos.go`: `ConsultasAPI` ampliada (`ListarCustodios`, `ListarCustodiosPorLote`, `ObtenerCustodio`); `ComandosAPI` ampliada (`CrearCustodio`, `ActualizarCustodio`); `AptitudCustodio` deja de ser stub. `Routes()` monta `GET /custodios` (con `?ids` para lote, excluyente con `cursor`), `POST /custodios`, `GET /custodios/{id}` (con `?a_fecha`), `PATCH /custodios/{id}` y la aptitud. Reutiliza los helpers de vehículos.
+- `internal/custodios/custodios_test.go` (nuevo): 3 pruebas unitarias de aptitud (fake de `pgx.Row`; la aptitud del custodio hace un solo `QueryRow`).
+- `internal/custodios/custodios_integracion_test.go` (nuevo): integración contra Postgres — `TestCrear_EmiteEventoEnLaMismaTx` (P17), `TestActualizar_CreaNuevaVersionSinSobrescribir` (P8/C9), `TestActualizar_ConUsuarioId` (round-trip de `usuario_id`, P1), `TestListarPorLote` (C4). Se saltan sin `CATALOGOS_TEST_DB`.
+- `migrations/grants_integration_test.go`: se agrega la aserción de que `svc_catalogos` puede cerrar la vigencia de un custodio (UPDATE `vigente_hasta`) y NO puede reescribir una versión (UPDATE `nombre` denegado, P8).
+- `README.md`: pin a `tracer.8`; `custodios` pasa de scaffolding a implementado; tabla de brechas y pendientes de modelado de E5-T2.
+
+**Decisiones de modelado (reportadas, pendientes de Operación/Lead):**
+- `GET /custodios/{id}/aptitud` recibe `cliente_id` obligatorio por contrato (simetría con vehículo), pero el custodio no pertenece a un cliente: el parámetro se acepta y **no acota** la evaluación. La aptitud es por `estado` (DEC-055, informativa).
+- El contrato expone `telefono`; se agregó la columna. Documentos de aptitud del custodio quedan "Por confirmar" (E5-HU-022): no se crea tabla sin consumidor.
+
+**Verificado:** `go build ./...`, `go vet ./...` limpios; `arch-test@v0.1.1` OK (catalogos sigue hoja). Pruebas de integración ejecutadas contra Postgres 18 real (Docker): `custodios`, `vehiculos` y `TestGrants` en verde. `go build ./cmd/api` OK (I5 standalone).
+
+**Pendiente:** C5, C8 y C10 siguen abiertas (otras historias). `cmd/api` aún no aplica migraciones al arrancar (TODO).
+
+**Archivos modificados:**
+- `go.mod`, `go.sum`
+- `catalogos.go`
+- `internal/custodios/custodios.go`
+- `internal/custodios/custodios_test.go`
+- `internal/custodios/custodios_integracion_test.go`
+- `migrations/catalogos/0005_custodio_cols.sql`
+- `migrations/grants_integration_test.go`
+- `README.md`
+
 ## 2026:10:13 (E5-T1 — superficie de vehículos sobre tracer.6)
 
 **Resumen:** Se implementa la superficie completa del sub-módulo `vehiculos` (E5-T1 / AI27-73) sobre el contrato `v0.1.0-tracer.6`, que cerró las brechas C3/C4/C6/C7/C9 de catálogos. Lectura paginada y por lote, lectura vigente o a una fecha con `version`, aptitud informativa, y escritura administrativa `POST`/`PATCH` que versiona por vigencia (no sobrescribe, P8) y emite `catalogo.actualizado` en la misma transacción (P17).

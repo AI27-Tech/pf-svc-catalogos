@@ -26,6 +26,7 @@ import (
 	platformerrors "github.com/AI27-Tech/pf-pkg-platform-go/errors"
 	"github.com/AI27-Tech/pf-pkg-platform-go/pgxpool"
 	"github.com/AI27-Tech/pf-pkg-platform-go/worker"
+	"github.com/AI27-Tech/pf-svc-catalogos/internal/custodios"
 	"github.com/AI27-Tech/pf-svc-catalogos/internal/vehiculos"
 	"github.com/google/uuid"
 )
@@ -77,6 +78,7 @@ type Module struct {
 	deps  Deps
 	// Casos de uso por sub-módulo. Se van agregando conforme se implementan.
 	vehiculos *vehiculos.Repositorio
+	custodios *custodios.Repositorio
 }
 
 // New construye el módulo con sus pools y puertos ya resueltos. No lee entorno
@@ -86,6 +88,7 @@ func New(p Pools, d Deps) (*Module, error) {
 		pools:     p,
 		deps:      d,
 		vehiculos: vehiculos.NewRepositorio(p.Catalogos),
+		custodios: custodios.NewRepositorio(p.Catalogos),
 	}, nil
 }
 
@@ -216,6 +219,125 @@ func (m *Module) Routes(mux *http.ServeMux) {
 		}
 		escribirJSON(w, http.StatusOK, ap)
 	})
+
+	// --- Custodios (superficie completa de E5-T2). Mismo patrón que vehículos:
+	// los handlers delegan en los MISMOS casos de uso que Consultas()/Comandos()
+	// (I3).
+
+	// GET /api/v1/custodios — listado paginado, o lote si viene ?ids (C4).
+	// `ids` y `cursor` son mutuamente excluyentes (contrato); con ambos, 400.
+	mux.HandleFunc("GET /api/v1/custodios", func(w http.ResponseWriter, r *http.Request) {
+		idsRaw := r.URL.Query().Get("ids")
+		cursorRaw := r.URL.Query().Get("cursor")
+		if idsRaw != "" && cursorRaw != "" {
+			escribirError(w, platformerrors.NewValidacion("ids y cursor son mutuamente excluyentes"))
+			return
+		}
+		if idsRaw != "" {
+			ids, err := parsearIDs(idsRaw)
+			if err != nil {
+				escribirError(w, err)
+				return
+			}
+			pag, err := q.ListarCustodiosPorLote(r.Context(), ids)
+			if err != nil {
+				escribirError(w, err)
+				return
+			}
+			escribirJSON(w, http.StatusOK, pag)
+			return
+		}
+		var cursor *catclient.Cursor
+		if cursorRaw != "" {
+			cursor = &cursorRaw
+		}
+		pag, err := q.ListarCustodios(r.Context(), cursor)
+		if err != nil {
+			escribirError(w, err)
+			return
+		}
+		escribirJSON(w, http.StatusOK, pag)
+	})
+
+	// POST /api/v1/custodios — alta.
+	mux.HandleFunc("POST /api/v1/custodios", func(w http.ResponseWriter, r *http.Request) {
+		var entrada catclient.CustodioEntrada
+		if err := json.NewDecoder(r.Body).Decode(&entrada); err != nil {
+			escribirError(w, platformerrors.NewValidacion("cuerpo inválido"))
+			return
+		}
+		cst, err := cmd.CrearCustodio(r.Context(), entrada)
+		if err != nil {
+			escribirError(w, err)
+			return
+		}
+		escribirJSON(w, http.StatusCreated, cst)
+	})
+
+	// GET /api/v1/custodios/{id} — vigente, o ?a_fecha (C9).
+	mux.HandleFunc("GET /api/v1/custodios/{id}", func(w http.ResponseWriter, r *http.Request) {
+		id, err := uuid.Parse(r.PathValue("id"))
+		if err != nil {
+			escribirError(w, platformerrors.NewValidacion("id de custodio inválido"))
+			return
+		}
+		aFecha, err := parsearAFecha(r.URL.Query().Get("a_fecha"))
+		if err != nil {
+			escribirError(w, err)
+			return
+		}
+		cst, err := q.ObtenerCustodio(r.Context(), id, aFecha)
+		if err != nil {
+			escribirError(w, err)
+			return
+		}
+		escribirJSON(w, http.StatusOK, cst)
+	})
+
+	// PATCH /api/v1/custodios/{id} — nueva versión.
+	mux.HandleFunc("PATCH /api/v1/custodios/{id}", func(w http.ResponseWriter, r *http.Request) {
+		id, err := uuid.Parse(r.PathValue("id"))
+		if err != nil {
+			escribirError(w, platformerrors.NewValidacion("id de custodio inválido"))
+			return
+		}
+		var cambios catclient.CustodioCambios
+		if err := json.NewDecoder(r.Body).Decode(&cambios); err != nil {
+			escribirError(w, platformerrors.NewValidacion("cuerpo inválido"))
+			return
+		}
+		cst, err := cmd.ActualizarCustodio(r.Context(), id, cambios)
+		if err != nil {
+			escribirError(w, err)
+			return
+		}
+		escribirJSON(w, http.StatusOK, cst)
+	})
+
+	// GET /api/v1/custodios/{id}/aptitud — aptitud informativa (DEC-055).
+	mux.HandleFunc("GET /api/v1/custodios/{id}/aptitud", func(w http.ResponseWriter, r *http.Request) {
+		id, err := uuid.Parse(r.PathValue("id"))
+		if err != nil {
+			escribirError(w, platformerrors.NewValidacion("id de custodio inválido"))
+			return
+		}
+		clienteRaw := r.URL.Query().Get("cliente_id")
+		if clienteRaw == "" {
+			escribirError(w, platformerrors.NewValidacion("cliente_id es obligatorio"))
+			return
+		}
+		clienteID, err := uuid.Parse(clienteRaw)
+		if err != nil {
+			escribirError(w, platformerrors.NewValidacion("cliente_id inválido"))
+			return
+		}
+		ap, err := q.AptitudCustodio(r.Context(), id, clienteID)
+		if err != nil {
+			escribirError(w, err)
+			return
+		}
+		escribirJSON(w, http.StatusOK, ap)
+	})
 }
 
 // parsearIDs convierte la lista separada por coma del query param `ids` a UUIDs.
@@ -334,10 +456,21 @@ type ConsultasAPI interface {
 	// cuando aFecha no es nil (C9, lectura probatoria P8).
 	ObtenerVehiculo(ctx context.Context, id catclient.Id, aFecha *catclient.MarcaTiempo) (*catclient.Vehiculo, error)
 	// AptitudVehiculo y AptitudCustodio devuelven aptitud INFORMATIVA (DEC-055):
-	// nunca gatean, y "desconocida" es un valor válido si el dato falta. clienteID
-	// acota la evaluación al contrato/SLA de ese cliente.
+	// nunca gatean, y "desconocida" es un valor válido si el dato falta. En
+	// vehiculo, clienteID acota la evaluación al contrato/SLA de ese cliente; en
+	// custodio se acepta por conformidad de contrato pero no acota (el custodio
+	// no pertenece a un cliente — ver custodios.Aptitud).
 	AptitudVehiculo(ctx context.Context, vehiculoID, clienteID catclient.Id) (*catclient.Aptitud, error)
 	AptitudCustodio(ctx context.Context, custodioID, clienteID catclient.Id) (*catclient.Aptitud, error)
+	// ListarCustodios devuelve una página de custodios vigentes (paginación por
+	// cursor; cursor nil arranca desde el principio).
+	ListarCustodios(ctx context.Context, cursor *catclient.Cursor) (*catclient.PaginaCustodios, error)
+	// ListarCustodiosPorLote devuelve los custodios vigentes de ids, en un solo
+	// viaje (C4): evita el patrón N+1 de los consumidores.
+	ListarCustodiosPorLote(ctx context.Context, ids []catclient.Id) (*catclient.PaginaCustodios, error)
+	// ObtenerCustodio devuelve el custodio vigente, o el vigente a una fecha
+	// cuando aFecha no es nil (C9, lectura probatoria P8).
+	ObtenerCustodio(ctx context.Context, id catclient.Id, aFecha *catclient.MarcaTiempo) (*catclient.Custodio, error)
 }
 
 // ComandosAPI es la superficie de ESCRITURA administrativa de catalogos (E5,
@@ -351,6 +484,12 @@ type ComandosAPI interface {
 	// ActualizarVehiculo crea una nueva versión con los campos presentes, sin
 	// sobrescribir la anterior (P8).
 	ActualizarVehiculo(ctx context.Context, id catclient.Id, c catclient.VehiculoCambios) (*catclient.Vehiculo, error)
+	// CrearCustodio da de alta un custodio (versión 1). A diferencia de vehículo,
+	// no toma cliente_id: el custodio no pertenece a un cliente.
+	CrearCustodio(ctx context.Context, e catclient.CustodioEntrada) (*catclient.Custodio, error)
+	// ActualizarCustodio crea una nueva versión con los campos presentes, sin
+	// sobrescribir la anterior (P8).
+	ActualizarCustodio(ctx context.Context, id catclient.Id, c catclient.CustodioCambios) (*catclient.Custodio, error)
 }
 
 // Comandos expone la superficie de escritura administrativa.
@@ -416,8 +555,45 @@ func (c *consultas) AptitudVehiculo(ctx context.Context, vehiculoID, clienteID c
 	return &ap, nil
 }
 
+func (c *consultas) ListarCustodios(ctx context.Context, cursor *catclient.Cursor) (*catclient.PaginaCustodios, error) {
+	pag, err := c.m.custodios.Listar(ctx, cursor)
+	if err != nil {
+		return nil, err
+	}
+	return &pag, nil
+}
+
+func (c *consultas) ListarCustodiosPorLote(ctx context.Context, ids []catclient.Id) (*catclient.PaginaCustodios, error) {
+	pag, err := c.m.custodios.ListarPorLote(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+	return &pag, nil
+}
+
+func (c *consultas) ObtenerCustodio(ctx context.Context, id catclient.Id, aFecha *catclient.MarcaTiempo) (*catclient.Custodio, error) {
+	cst, err := c.m.custodios.Obtener(ctx, id, aFecha)
+	if errors.Is(err, custodios.ErrNoEncontrado) {
+		return nil, platformerrors.NewNoEncontrado("custodio no encontrado")
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &cst, nil
+}
+
+// AptitudCustodio devuelve aptitud INFORMATIVA del custodio (DEC-055). clienteID
+// se recibe por conformidad con el contrato pero NO acota la evaluación.
 func (c *consultas) AptitudCustodio(ctx context.Context, custodioID, clienteID catclient.Id) (*catclient.Aptitud, error) {
-	return nil, errNoImplementado("AptitudCustodio")
+	_ = clienteID // aceptado pero no usado en V1 (pendiente de decisión de modelado)
+	ap, err := c.m.custodios.Aptitud(ctx, custodioID)
+	if errors.Is(err, custodios.ErrNoEncontrado) {
+		return nil, platformerrors.NewNoEncontrado("custodio no encontrado")
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &ap, nil
 }
 
 // comandos implementa ComandosAPI delegando en el repositorio de cada
@@ -443,4 +619,23 @@ func (c *comandos) ActualizarVehiculo(ctx context.Context, id catclient.Id, camb
 		return nil, err
 	}
 	return &v, nil
+}
+
+func (c *comandos) CrearCustodio(ctx context.Context, e catclient.CustodioEntrada) (*catclient.Custodio, error) {
+	cst, err := c.m.custodios.Crear(ctx, e)
+	if err != nil {
+		return nil, err
+	}
+	return &cst, nil
+}
+
+func (c *comandos) ActualizarCustodio(ctx context.Context, id catclient.Id, cambios catclient.CustodioCambios) (*catclient.Custodio, error) {
+	cst, err := c.m.custodios.Actualizar(ctx, id, cambios, time.Now())
+	if errors.Is(err, custodios.ErrNoEncontrado) {
+		return nil, platformerrors.NewNoEncontrado("custodio no encontrado")
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &cst, nil
 }
