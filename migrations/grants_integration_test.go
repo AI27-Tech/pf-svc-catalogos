@@ -78,9 +78,13 @@ func TestGrants(t *testing.T) {
 	mustExec(t, ctx, pool,
 		fmt.Sprintf(`UPDATE catalogos.cliente SET vigente_hasta = now() WHERE id = '%s' AND version = 1`, clienteID),
 		"svc_catalogos debe poder cerrar la vigencia de una versión")
+	custodioID := "44444444-4444-4444-4444-444444444444"
 	mustExec(t, ctx, pool,
-		`INSERT INTO catalogos.custodio (id, version, nombre, estado) VALUES (gen_random_uuid(), 1, 'n', 'activo')`,
+		fmt.Sprintf(`INSERT INTO catalogos.custodio (id, version, nombre, estado) VALUES ('%s', 1, 'n', 'activo')`, custodioID),
 		"svc_catalogos debe poder insertar una versión de custodio")
+	mustExec(t, ctx, pool,
+		fmt.Sprintf(`UPDATE catalogos.custodio SET vigente_hasta = now() WHERE id = '%s' AND version = 1`, custodioID),
+		"svc_catalogos debe poder cerrar la vigencia de un custodio")
 
 	// Vehículo (0003/0004): mismo patrón de versionado por vigencia (P8).
 	vehiculoID := "33333333-3333-3333-3333-333333333333"
@@ -93,6 +97,33 @@ func TestGrants(t *testing.T) {
 	mustExec(t, ctx, pool,
 		`INSERT INTO catalogos.vehiculo_documento (id, version, vehiculo_id, clase) VALUES (gen_random_uuid(), 1, '33333333-3333-3333-3333-333333333333', 'poliza')`,
 		"svc_catalogos debe poder insertar un documento de vehículo")
+
+	// Contrato y SLA (0008, E5-T4): mismo patrón de versionado por vigencia (P8).
+	// El INSERT omite `estado` (0008 lo relajó a NULL): el schema del contrato no
+	// lo expone. `descripcion` es la columna que 0008 agregó.
+	contratoID := "66666666-6666-6666-6666-666666666666"
+	mustExec(t, ctx, pool,
+		fmt.Sprintf(`INSERT INTO catalogos.contrato (id, version, cliente_id, descripcion) VALUES ('%s', 1, '%s', 'marco')`, contratoID, clienteID),
+		"svc_catalogos debe poder insertar una versión de contrato")
+	mustExec(t, ctx, pool,
+		fmt.Sprintf(`UPDATE catalogos.contrato SET vigente_hasta = now() WHERE id = '%s' AND version = 1`, contratoID),
+		"svc_catalogos debe poder cerrar la vigencia de un contrato")
+	slaID := "77777777-7777-7777-7777-777777777777"
+	mustExec(t, ctx, pool,
+		fmt.Sprintf(`INSERT INTO catalogos.sla (id, version, contrato_id, descripcion) VALUES ('%s', 1, '%s', 'respuesta en 30 min')`, slaID, contratoID),
+		"svc_catalogos debe poder insertar una versión de SLA")
+	mustExec(t, ctx, pool,
+		fmt.Sprintf(`UPDATE catalogos.sla SET vigente_hasta = now() WHERE id = '%s' AND version = 1`, slaID),
+		"svc_catalogos debe poder cerrar la vigencia de un SLA")
+
+	// Valor de catálogo de tipo (0006/0007): mismo patrón de versionado (P8).
+	valorID := "55555555-5555-5555-5555-555555555555"
+	mustExec(t, ctx, pool,
+		fmt.Sprintf(`INSERT INTO catalogos.valor_catalogo (id, version, tipo, codigo, etiqueta, estado) VALUES ('%s', 1, 'lineas_transporte', 'TRANSPORTES-SA', 'Transportes S.A.', 'activo')`, valorID),
+		"svc_catalogos debe poder insertar un valor de catálogo de tipo")
+	mustExec(t, ctx, pool,
+		fmt.Sprintf(`UPDATE catalogos.valor_catalogo SET vigente_hasta = now() WHERE id = '%s' AND version = 1`, valorID),
+		"svc_catalogos debe poder cerrar la vigencia de un valor de catálogo")
 
 	// Publicar catalogo.actualizado con el publicador real, en una tx.
 	inTx(t, ctx, pool, "svc_catalogos debe poder publicar en su outbox", func(tx pgx.Tx) error {
@@ -119,6 +150,8 @@ func TestGrants(t *testing.T) {
 		{`DELETE FROM catalogos.contrato`, "permission denied for table contrato", "no se borra un contrato"},
 		{`DELETE FROM catalogos.sla`, "permission denied for table sla", "no se borra un SLA"},
 		{`DELETE FROM catalogos.custodio`, "permission denied for table custodio", "no se borra un custodio"},
+		{`UPDATE catalogos.custodio SET nombre = 'otro'`, "permission denied for table custodio",
+			"no se reescribe una versión de custodio: solo se cierra su vigencia (P8)"},
 		{`DELETE FROM catalogos.vehiculo`, "permission denied for table vehiculo",
 			"no se borra en firme una versión de vehículo (P8)"},
 		{`UPDATE catalogos.vehiculo SET placas = 'x'`, "permission denied for table vehiculo",
@@ -127,6 +160,10 @@ func TestGrants(t *testing.T) {
 			"no se borra en firme un documento de vehículo (P8)"},
 		{`UPDATE catalogos.vehiculo_documento SET clase = 'x'`, "permission denied for table vehiculo_documento",
 			"no se reescribe un documento: solo se cierra su vigencia (P8)"},
+		{`DELETE FROM catalogos.valor_catalogo`, "permission denied for table valor_catalogo",
+			"no se borra en firme un valor de catálogo (P8)"},
+		{`UPDATE catalogos.valor_catalogo SET etiqueta = 'otra'`, "permission denied for table valor_catalogo",
+			"no se reescribe una versión de valor: solo se cierra su vigencia (P8)"},
 		{`DELETE FROM catalogos.outbox`, "permission denied for table outbox", "no se borra el outbox"},
 		{`UPDATE catalogos.inbox_evento SET tipo = 'x'`, "permission denied for table inbox_evento",
 			"el inbox no se reescribe"},
