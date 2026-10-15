@@ -6,10 +6,10 @@ custodios y catálogos de tipo—. Es una **hoja del grafo** (`catalogo -> []`):
 no llama a `operacion` ni a ningún módulo de dominio. Vive dentro del deployable
 `core`.
 
-Estado: el sub-módulo `vehiculos` está **implementado** sobre el contrato
-`v0.1.0-tracer.6` (E5-T1: lectura paginada y por lote, lectura a una fecha,
-aptitud informativa, y escritura `POST`/`PATCH` con outbox en la misma
-transacción). El resto de los sub-módulos (`clientes`, `sla`, `custodios`,
+Estado: los sub-módulos `vehiculos` (E5-T1) y `custodios` (E5-T2) están
+**implementados** sobre el contrato `v0.1.0-tracer.8` (lectura paginada y por
+lote, lectura a una fecha, aptitud informativa, y escritura `POST`/`PATCH` con
+outbox en la misma transacción). El resto de los sub-módulos (`clientes`, `sla`,
 `tipos`) siguen en scaffolding.
 
 ## Frontera (ADR 31)
@@ -50,29 +50,42 @@ historia ni `DELETE` en firme (P8).
 
 ## Estado de las superficies de contrato
 
-Verificado contra `pf-pkg-contracts` en `v0.1.0-tracer.6` (contrato pinned). Lo
+Verificado contra `pf-pkg-contracts` en `v0.1.0-tracer.8` (contrato pinned). Lo
 presente se implementa; lo ausente se reporta y **no se escribe a mano**
-(contrato primero, 00 regla 6). La superficie de vehículos de E5-T1 ya está
-cerrada e implementada; quedan abiertas C5, C8 y C10 (otras historias).
+(contrato primero, 00 regla 6). Las superficies de vehículos (E5-T1) y custodios
+(E5-T2) ya están cerradas e implementadas; quedan abiertas C5, C8 y C10 (otras
+historias).
 
-| # | Superficie | Estado en tracer.6 | Efecto |
+| # | Superficie | Estado en tracer.8 | Efecto |
 |---|---|---|---|
 | C1 | Cliente Go `api-client-go/catalogos` | ✅ presente | — |
 | C2 | Lectura de clientes, contrato, SLA | ✅ presente | implementable |
 | C11 | Aptitud de custodio y vehículo | ✅ presente | lectura informativa (DEC-055) |
 | C3 | Átomo **vehículo** (ADR 31) en lugar de `Unidad` (ADR 24) | ✅ cerrada en tracer.4 | `/api/v1/vehiculos`, schema `Vehiculo`; paquete `vehiculos` implementado (E5-T1) |
-| C4 | Lectura por lote de vehículos | ✅ cerrada en tracer.5 | `GET /vehiculos?ids=...` implementado |
-| C6 | **Versión** en la respuesta de lectura | ✅ cerrada en tracer.5 | `Vehiculo.version` (opcional) implementado |
-| C7 | Superficie admin `POST`/`PATCH` de vehículos | ✅ cerrada en tracer.5 | `crearVehiculo`/`actualizarVehiculo` con outbox (P17) implementados |
-| C9 | Lectura a una fecha de vehículos | ✅ cerrada en tracer.5 | `GET /vehiculos/{id}?a_fecha=...` implementado |
+| C4 | Lectura por lote de vehículos **y custodios** | ✅ vehículos en tracer.5, custodios en tracer.8 | `GET /vehiculos?ids=...` y `GET /custodios?ids=...` implementados |
+| C6 | **Versión** en la respuesta de lectura | ✅ vehículos en tracer.5, custodios en tracer.8 | `Vehiculo.version` y `Custodio.version` (opcionales) implementados |
+| C7 | Superficie admin `POST`/`PATCH` de vehículos **y custodios** | ✅ vehículos en tracer.5, custodios en tracer.8 | `crear/actualizarVehiculo` y `crear/actualizarCustodio` con outbox (P17) implementados |
+| C9 | Lectura a una fecha de vehículos **y custodios** | ✅ vehículos en tracer.5, custodios en tracer.8 | `GET /{vehiculos,custodios}/{id}?a_fecha=...` implementado |
 | C5 | Lectura por lote de clientes/contratos/SLA | ❌ falta | bloquea lecturas `:lote` de `bff`/`reportes`/`mensajeria` |
 | C8 | Catálogos de tipo (tipos, líneas, GPS, zonas lista) | ❌ falta | bloquea el paquete `tipos`, sus tablas y rutas |
 | C10 | `catalogo.actualizado` con **versión** | ❌ falta (proto sin campo versión) | la versión viaja en el sobre de dominio; el payload del evento se alineará cuando el contrato la agregue |
 
-C3/C4/C6/C7/C9 (la superficie de vehículos de E5-T1) se cerraron en la ola de
-catálogos (`tracer.5`, publicada en `tracer.6`) y ya están implementadas. C5
+C3/C4/C6/C7/C9 para vehículos (E5-T1) se cerraron en `tracer.5`; las mismas
+superficies para custodios (E5-T2) en `tracer.8`, y ya están implementadas. C5
 (lote de otros agregados), C8 (catálogos de tipo) y C10 (versión en el evento)
 siguen abiertas: son otras historias.
+
+### Pendientes de modelado reportados en E5-T2 (no resueltos aquí)
+
+- **Aptitud de custodio por cliente:** el contrato declara `cliente_id`
+  obligatorio en `GET /custodios/{id}/aptitud`, por simetría con vehículo, pero
+  el custodio **no pertenece a un cliente** (su tabla no tiene `cliente_id`). La
+  implementación acepta el parámetro por conformidad y **no acota** por él; la
+  aptitud se evalúa solo por `estado` (DEC-055, informativa). De dónde sale la
+  relación custodio↔cliente —si la hay en V1— es decisión de Operación/Lead.
+- **Documentos del custodio:** a diferencia de vehículo, el custodio no tiene
+  tabla de documentos (E5-HU-022 los dejó "Por confirmar"), así que la aptitud
+  no evalúa vencimientos. Pendiente de Operación.
 
 ## Diferido a V2 (no se crea)
 

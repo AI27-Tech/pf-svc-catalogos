@@ -78,9 +78,13 @@ func TestGrants(t *testing.T) {
 	mustExec(t, ctx, pool,
 		fmt.Sprintf(`UPDATE catalogos.cliente SET vigente_hasta = now() WHERE id = '%s' AND version = 1`, clienteID),
 		"svc_catalogos debe poder cerrar la vigencia de una versión")
+	custodioID := "44444444-4444-4444-4444-444444444444"
 	mustExec(t, ctx, pool,
-		`INSERT INTO catalogos.custodio (id, version, nombre, estado) VALUES (gen_random_uuid(), 1, 'n', 'activo')`,
+		fmt.Sprintf(`INSERT INTO catalogos.custodio (id, version, nombre, estado) VALUES ('%s', 1, 'n', 'activo')`, custodioID),
 		"svc_catalogos debe poder insertar una versión de custodio")
+	mustExec(t, ctx, pool,
+		fmt.Sprintf(`UPDATE catalogos.custodio SET vigente_hasta = now() WHERE id = '%s' AND version = 1`, custodioID),
+		"svc_catalogos debe poder cerrar la vigencia de un custodio")
 
 	// Vehículo (0003/0004): mismo patrón de versionado por vigencia (P8).
 	vehiculoID := "33333333-3333-3333-3333-333333333333"
@@ -119,6 +123,8 @@ func TestGrants(t *testing.T) {
 		{`DELETE FROM catalogos.contrato`, "permission denied for table contrato", "no se borra un contrato"},
 		{`DELETE FROM catalogos.sla`, "permission denied for table sla", "no se borra un SLA"},
 		{`DELETE FROM catalogos.custodio`, "permission denied for table custodio", "no se borra un custodio"},
+		{`UPDATE catalogos.custodio SET nombre = 'otro'`, "permission denied for table custodio",
+			"no se reescribe una versión de custodio: solo se cierra su vigencia (P8)"},
 		{`DELETE FROM catalogos.vehiculo`, "permission denied for table vehiculo",
 			"no se borra en firme una versión de vehículo (P8)"},
 		{`UPDATE catalogos.vehiculo SET placas = 'x'`, "permission denied for table vehiculo",
