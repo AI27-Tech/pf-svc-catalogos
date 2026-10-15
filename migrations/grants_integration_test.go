@@ -98,6 +98,15 @@ func TestGrants(t *testing.T) {
 		`INSERT INTO catalogos.vehiculo_documento (id, version, vehiculo_id, clase) VALUES (gen_random_uuid(), 1, '33333333-3333-3333-3333-333333333333', 'poliza')`,
 		"svc_catalogos debe poder insertar un documento de vehículo")
 
+	// Valor de catálogo de tipo (0006/0007): mismo patrón de versionado (P8).
+	valorID := "55555555-5555-5555-5555-555555555555"
+	mustExec(t, ctx, pool,
+		fmt.Sprintf(`INSERT INTO catalogos.valor_catalogo (id, version, tipo, codigo, etiqueta, estado) VALUES ('%s', 1, 'lineas_transporte', 'TRANSPORTES-SA', 'Transportes S.A.', 'activo')`, valorID),
+		"svc_catalogos debe poder insertar un valor de catálogo de tipo")
+	mustExec(t, ctx, pool,
+		fmt.Sprintf(`UPDATE catalogos.valor_catalogo SET vigente_hasta = now() WHERE id = '%s' AND version = 1`, valorID),
+		"svc_catalogos debe poder cerrar la vigencia de un valor de catálogo")
+
 	// Publicar catalogo.actualizado con el publicador real, en una tx.
 	inTx(t, ctx, pool, "svc_catalogos debe poder publicar en su outbox", func(tx pgx.Tx) error {
 		return outbox.NewPublisher().Publish(ctx, tx, outbox.Event{
@@ -133,6 +142,10 @@ func TestGrants(t *testing.T) {
 			"no se borra en firme un documento de vehículo (P8)"},
 		{`UPDATE catalogos.vehiculo_documento SET clase = 'x'`, "permission denied for table vehiculo_documento",
 			"no se reescribe un documento: solo se cierra su vigencia (P8)"},
+		{`DELETE FROM catalogos.valor_catalogo`, "permission denied for table valor_catalogo",
+			"no se borra en firme un valor de catálogo (P8)"},
+		{`UPDATE catalogos.valor_catalogo SET etiqueta = 'otra'`, "permission denied for table valor_catalogo",
+			"no se reescribe una versión de valor: solo se cierra su vigencia (P8)"},
 		{`DELETE FROM catalogos.outbox`, "permission denied for table outbox", "no se borra el outbox"},
 		{`UPDATE catalogos.inbox_evento SET tipo = 'x'`, "permission denied for table inbox_evento",
 			"el inbox no se reescribe"},

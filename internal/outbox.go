@@ -22,6 +22,15 @@ type EntidadActualizada struct {
 	Entidad   string // tipo de entidad de catálogo
 	EntidadID string // identificador de la entidad
 	Version   int    // versión nueva, para orden y trazabilidad del consumidor
+
+	// SubTipo discrimina DENTRO de una entidad que agrupa varias listas bajo una
+	// sola tabla: para Entidad "valor_catalogo" lleva cuál de los cinco catálogos
+	// de tipo cambió (p. ej. "lineas_transporte"), para que el consumidor pueda
+	// invalidar caché por lista sin releer el valor (E5-T3, decisión B2). Vacío
+	// en las entidades de una sola tabla (cliente, contrato, sla, custodio,
+	// vehiculo): entonces no viaja en el payload. Sigue siendo metadato (tipo +
+	// identidad), nunca el contenido de la entidad.
+	SubTipo string
 }
 
 // PublicarActualizacion escribe catalogo.actualizado en la outbox dentro de la
@@ -40,15 +49,22 @@ func PublicarActualizacion(ctx context.Context, pub *outbox.Publisher, tx pgx.Tx
 	if e.Entidad == "" || e.EntidadID == "" {
 		return fmt.Errorf("catalogos: entidad y entidad_id son obligatorios para catalogo.actualizado")
 	}
+	// Payload mínimo: tipo + identidad, nunca el contenido de la entidad. El
+	// subtipo, si existe, discrimina la lista dentro de valor_catalogo (B2); no
+	// entra en la clave de orden (AgregadoID sigue siendo la identidad del valor,
+	// para que las actualizaciones de un mismo valor lleguen en orden).
+	payload := map[string]string{
+		"entidad":    e.Entidad,
+		"entidad_id": e.EntidadID,
+	}
+	if e.SubTipo != "" {
+		payload["tipo"] = e.SubTipo
+	}
 	return pub.Publish(ctx, tx, outbox.Event{
 		Tipo:         TipoCatalogoActualizado,
 		Version:      e.Version,
 		AgregadoID:   e.EntidadID,
 		Sensibilidad: outbox.SensibilidadAmplia,
-		// Payload mínimo: tipo + identidad, nunca el contenido de la entidad.
-		Payload: map[string]string{
-			"entidad":    e.Entidad,
-			"entidad_id": e.EntidadID,
-		},
+		Payload:      payload,
 	})
 }

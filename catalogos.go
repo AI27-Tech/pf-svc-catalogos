@@ -27,6 +27,7 @@ import (
 	"github.com/AI27-Tech/pf-pkg-platform-go/pgxpool"
 	"github.com/AI27-Tech/pf-pkg-platform-go/worker"
 	"github.com/AI27-Tech/pf-svc-catalogos/internal/custodios"
+	"github.com/AI27-Tech/pf-svc-catalogos/internal/tipos"
 	"github.com/AI27-Tech/pf-svc-catalogos/internal/vehiculos"
 	"github.com/google/uuid"
 )
@@ -79,6 +80,7 @@ type Module struct {
 	// Casos de uso por sub-módulo. Se van agregando conforme se implementan.
 	vehiculos *vehiculos.Repositorio
 	custodios *custodios.Repositorio
+	tipos     *tipos.Repositorio
 }
 
 // New construye el módulo con sus pools y puertos ya resueltos. No lee entorno
@@ -89,15 +91,15 @@ func New(p Pools, d Deps) (*Module, error) {
 		deps:      d,
 		vehiculos: vehiculos.NewRepositorio(p.Catalogos),
 		custodios: custodios.NewRepositorio(p.Catalogos),
+		tipos:     tipos.NewRepositorio(p.Catalogos),
 	}, nil
 }
 
-// Routes monta las rutas HTTP del módulo bajo /api/v1/... en el mux dado.
-// Scaffolding: hoy no monta ninguna ruta de negocio. Las rutas se agregan una a
-// una conforme se implementen los casos de uso, y SOLO las presentes en la
-// versión fijada de catalogos.yaml (contrato primero). Las rutas de vehículo,
-// lote, administración y catálogos de tipo están bloqueadas por brechas de
-// contrato (ver README, brechas C3–C10).
+// Routes monta las rutas HTTP del módulo bajo /api/v1/... en el mux dado. Solo
+// monta las operaciones presentes en la versión fijada de catalogos.yaml
+// (contrato primero, 00 regla 6). Hoy monta vehículos (E5-T1), custodios
+// (E5-T2) y catálogos de tipo (E5-T3), ya cerradas en tracer.8. Las lecturas de
+// cliente/contrato/SLA siguen en scaffold (brecha C5), así que no se montan.
 func (m *Module) Routes(mux *http.ServeMux) {
 	// Vehículos (superficie completa de E5-T1 sobre tracer.6). Los handlers
 	// delegan en los MISMOS casos de uso que Consultas()/Comandos() (I3): el
@@ -338,6 +340,64 @@ func (m *Module) Routes(mux *http.ServeMux) {
 		}
 		escribirJSON(w, http.StatusOK, ap)
 	})
+
+	// --- Catálogos de tipo (E5-T3). UN solo recurso parametrizado por `{tipo}`
+	// para las cinco listas de valores de V1 (contrato tracer.8, opción A). El
+	// `{tipo}` se valida contra el enum TipoCatalogo; uno inválido es 400 (no
+	// 404), porque es un valor de ruta mal formado, no un recurso ausente.
+
+	// GET /api/v1/catalogos-tipo/{tipo} — lectura por lote (paginada por cursor).
+	mux.HandleFunc("GET /api/v1/catalogos-tipo/{tipo}", func(w http.ResponseWriter, r *http.Request) {
+		tipo := catclient.TipoCatalogo(r.PathValue("tipo"))
+		var cursor *catclient.Cursor
+		if cursorRaw := r.URL.Query().Get("cursor"); cursorRaw != "" {
+			cursor = &cursorRaw
+		}
+		pag, err := q.ListarValoresCatalogo(r.Context(), tipo, cursor)
+		if err != nil {
+			escribirError(w, err)
+			return
+		}
+		escribirJSON(w, http.StatusOK, pag)
+	})
+
+	// POST /api/v1/catalogos-tipo/{tipo} — alta de un valor (versión 1).
+	mux.HandleFunc("POST /api/v1/catalogos-tipo/{tipo}", func(w http.ResponseWriter, r *http.Request) {
+		tipo := catclient.TipoCatalogo(r.PathValue("tipo"))
+		var entrada catclient.ValorCatalogoEntrada
+		if err := json.NewDecoder(r.Body).Decode(&entrada); err != nil {
+			escribirError(w, platformerrors.NewValidacion("cuerpo inválido"))
+			return
+		}
+		v, err := cmd.CrearValorCatalogo(r.Context(), tipo, entrada)
+		if err != nil {
+			escribirError(w, err)
+			return
+		}
+		escribirJSON(w, http.StatusCreated, v)
+	})
+
+	// PATCH /api/v1/catalogos-tipo/{tipo}/{id} — nueva versión (modificar o
+	// desactivar). Desactivar es enviar estado: inactivo por esta misma ruta.
+	mux.HandleFunc("PATCH /api/v1/catalogos-tipo/{tipo}/{id}", func(w http.ResponseWriter, r *http.Request) {
+		tipo := catclient.TipoCatalogo(r.PathValue("tipo"))
+		id, err := uuid.Parse(r.PathValue("id"))
+		if err != nil {
+			escribirError(w, platformerrors.NewValidacion("id de valor de catálogo inválido"))
+			return
+		}
+		var cambios catclient.ValorCatalogoCambios
+		if err := json.NewDecoder(r.Body).Decode(&cambios); err != nil {
+			escribirError(w, platformerrors.NewValidacion("cuerpo inválido"))
+			return
+		}
+		v, err := cmd.ActualizarValorCatalogo(r.Context(), tipo, id, cambios)
+		if err != nil {
+			escribirError(w, err)
+			return
+		}
+		escribirJSON(w, http.StatusOK, v)
+	})
 }
 
 // parsearIDs convierte la lista separada por coma del query param `ids` a UUIDs.
@@ -436,12 +496,13 @@ func (m *Module) Consultas() ConsultasAPI {
 // 1:1 a un operationId presente en catalogos.yaml de la versión fijada; no hay
 // métodos sin operación contractual (00 regla 6).
 //
-// Expone lo que el contrato tracer.6 ya tiene para catalogos: lectura de
-// clientes, contrato y SLA; y la superficie de vehículos de E5-T1 — listado
-// (paginado y por lote), lectura vigente o a una fecha, y aptitud. El átomo es
-// `Vehiculo` (ADR 31 §5), no `Unidad`, y la aptitud se evalúa contra el
-// contrato/SLA de un cliente (de ahí `clienteID`). La aptitud es INFORMATIVA
-// (DEC-055): nunca gatea.
+// Expone lo que el contrato tracer.8 ya tiene para catalogos: la superficie de
+// vehículos (E5-T1) y custodios (E5-T2) —listado paginado y por lote, lectura
+// vigente o a una fecha, y aptitud—, y la lectura por lote de los catálogos de
+// tipo (E5-T3). La lectura de cliente/contrato/SLA sigue declarada pero en
+// scaffold. El átomo es `Vehiculo` (ADR 31 §5), no `Unidad`, y la aptitud se
+// evalúa contra el contrato/SLA de un cliente (de ahí `clienteID`). La aptitud
+// es INFORMATIVA (DEC-055): nunca gatea.
 type ConsultasAPI interface {
 	ObtenerCliente(ctx context.Context, id catclient.Id) (*catclient.Cliente, error)
 	ObtenerContrato(ctx context.Context, id catclient.Id, aFecha *catclient.MarcaTiempo) (*catclient.Contrato, error)
@@ -471,6 +532,10 @@ type ConsultasAPI interface {
 	// ObtenerCustodio devuelve el custodio vigente, o el vigente a una fecha
 	// cuando aFecha no es nil (C9, lectura probatoria P8).
 	ObtenerCustodio(ctx context.Context, id catclient.Id, aFecha *catclient.MarcaTiempo) (*catclient.Custodio, error)
+	// ListarValoresCatalogo devuelve una página de valores vigentes de uno de los
+	// cinco catálogos de tipo de V1 (E5-T3), paginada por cursor; cursor nil
+	// arranca desde el principio. Un `tipo` fuera del enum es error de validación.
+	ListarValoresCatalogo(ctx context.Context, tipo catclient.TipoCatalogo, cursor *catclient.Cursor) (*catclient.PaginaValoresCatalogo, error)
 }
 
 // ComandosAPI es la superficie de ESCRITURA administrativa de catalogos (E5,
@@ -490,6 +555,13 @@ type ComandosAPI interface {
 	// ActualizarCustodio crea una nueva versión con los campos presentes, sin
 	// sobrescribir la anterior (P8).
 	ActualizarCustodio(ctx context.Context, id catclient.Id, c catclient.CustodioCambios) (*catclient.Custodio, error)
+	// CrearValorCatalogo da de alta un valor en el catálogo `tipo` (versión 1).
+	// El `tipo` viaja en la ruta, no en el cuerpo (contrato tracer.8).
+	CrearValorCatalogo(ctx context.Context, tipo catclient.TipoCatalogo, e catclient.ValorCatalogoEntrada) (*catclient.ValorCatalogo, error)
+	// ActualizarValorCatalogo crea una nueva versión con los campos presentes, sin
+	// sobrescribir la anterior (P8). Desactivar un valor es enviar estado
+	// `inactivo` por esta vía: no rompe los registros históricos (E5-HU-023).
+	ActualizarValorCatalogo(ctx context.Context, tipo catclient.TipoCatalogo, id catclient.Id, c catclient.ValorCatalogoCambios) (*catclient.ValorCatalogo, error)
 }
 
 // Comandos expone la superficie de escritura administrativa.
@@ -498,8 +570,8 @@ func (m *Module) Comandos() ComandosAPI {
 }
 
 // consultas implementa ConsultasAPI delegando en los casos de uso del módulo.
-// Scaffolding: todos los métodos devuelven "no implementado" todavía; la
-// implementación real llega con cada sub-módulo.
+// vehículos, custodios y catálogos de tipo ya están implementados; cliente,
+// contrato y SLA siguen devolviendo "no implementado" (scaffold).
 type consultas struct {
 	m *Module
 }
@@ -596,6 +668,17 @@ func (c *consultas) AptitudCustodio(ctx context.Context, custodioID, clienteID c
 	return &ap, nil
 }
 
+func (c *consultas) ListarValoresCatalogo(ctx context.Context, tipo catclient.TipoCatalogo, cursor *catclient.Cursor) (*catclient.PaginaValoresCatalogo, error) {
+	pag, err := c.m.tipos.Listar(ctx, tipo, cursor)
+	if errors.Is(err, tipos.ErrTipoInvalido) {
+		return nil, platformerrors.NewValidacion("tipo de catálogo inválido")
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &pag, nil
+}
+
 // comandos implementa ComandosAPI delegando en el repositorio de cada
 // sub-módulo. La escritura de vehículos ya está implementada (C7).
 type comandos struct {
@@ -638,4 +721,29 @@ func (c *comandos) ActualizarCustodio(ctx context.Context, id catclient.Id, camb
 		return nil, err
 	}
 	return &cst, nil
+}
+
+func (c *comandos) CrearValorCatalogo(ctx context.Context, tipo catclient.TipoCatalogo, e catclient.ValorCatalogoEntrada) (*catclient.ValorCatalogo, error) {
+	v, err := c.m.tipos.Crear(ctx, tipo, e)
+	if errors.Is(err, tipos.ErrTipoInvalido) {
+		return nil, platformerrors.NewValidacion("tipo de catálogo inválido")
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &v, nil
+}
+
+func (c *comandos) ActualizarValorCatalogo(ctx context.Context, tipo catclient.TipoCatalogo, id catclient.Id, cambios catclient.ValorCatalogoCambios) (*catclient.ValorCatalogo, error) {
+	v, err := c.m.tipos.Actualizar(ctx, tipo, id, cambios, time.Now())
+	if errors.Is(err, tipos.ErrTipoInvalido) {
+		return nil, platformerrors.NewValidacion("tipo de catálogo inválido")
+	}
+	if errors.Is(err, tipos.ErrNoEncontrado) {
+		return nil, platformerrors.NewNoEncontrado("valor de catálogo no encontrado")
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &v, nil
 }
