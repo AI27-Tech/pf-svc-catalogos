@@ -1,5 +1,43 @@
 # CHANGELOG
 
+## 2026:10:15 (E5-T3 — catálogos de tipo sobre tracer.8)
+
+**Resumen:** Se implementa el sub-módulo `tipos` (E5-T3 / AI27-75) sobre el contrato `v0.1.0-tracer.8`, que cerró la brecha C8 (recurso `/api/v1/catalogos-tipo/{tipo}`). Las cinco listas de valores de V1 (tipos de servicio, líneas de transporte, tipos de unidad —incluye `Patrulla`, ADR 31/DEC-044—, tipos de custodia y zonas de riesgo como lista sin geometría, DEC-017) viven en UNA sola tabla `valor_catalogo` parametrizada por `tipo` (opción A del contrato). Lectura por lote que devuelve `version` (C4/C6) y escritura administrativa `POST`/`PATCH` que versiona por vigencia (no sobrescribe, P8) y emite `catalogo.actualizado` en la misma transacción (P17). Desactivar un valor es un `PATCH` a `estado: inactivo` que crea una nueva versión y no rompe la historia (E5-HU-023).
+
+**Decisiones de la sesión:**
+- **A1 — Autorización por rol diferida:** DEC-047 #1 pide que sólo los Coordinadores creen líneas de transporte. No se implementa en E5-T3: `catalogos` no tiene aún mecanismo de autorización por rol de negocio y el contrato no da gancho por tipo. La escritura no distingue rol; queda anotado en `internal/tipos/doc.go` y en el README.
+- **B2 — Subtipo en el evento:** `catalogo.actualizado` usa `entidad = "valor_catalogo"` para las cinco listas (comparten tabla) y lleva en el payload mínimo un `tipo` con la lista concreta (p. ej. `lineas_transporte`), para que el consumidor invalide caché por lista sin releer. Sigue siendo metadato (tipo + identidad), nunca el contenido; el `AgregadoID` (clave de orden) sigue siendo la identidad del valor.
+
+**Cambios:**
+- `migrations/catalogos/0006_valor_catalogo.sql` (nuevo): tabla `valor_catalogo` versionada por vigencia (PK `(id, version)`), con índice único parcial de versión vigente, índice de lectura por lote `(tipo)` e índice único `(tipo, codigo)` entre vigentes. El `tipo` se valida en el caso de uso, no con un CHECK (agregar una lista futura no debe exigir migración de constraint). Sin geometría para `zonas_riesgo` (DEC-017).
+- `migrations/catalogos/0007_valor_catalogo_grants.sql` (nuevo): privilegio mínimo — SELECT/INSERT y UPDATE solo de `vigente_hasta`, sin DELETE (P8).
+- `internal/outbox.go`: `EntidadActualizada` gana el campo opcional `SubTipo`; cuando viene, se agrega como `tipo` al payload (B2). Las entidades de una sola tabla (cliente/contrato/sla/custodio/vehiculo) no lo llevan.
+- `internal/tipos/tipos.go` (nuevo): repositorio con `Listar` (cursor, por `tipo`), `Crear` y `Actualizar` (C7) con `pgx.BeginFunc` + outbox en la misma tx (P17). `ValidarTipo` rechaza un `tipo` fuera del enum (el handler lo traduce a 400). `escanearValores` mapea `version` pero no las vigencias (el schema `ValorCatalogo` no las expone).
+- `internal/tipos/doc.go`: reescrito — C8 implementada; nota del pendiente de autorización por rol (A1).
+- `catalogos.go`: `ConsultasAPI` gana `ListarValoresCatalogo`; `ComandosAPI` gana `CrearValorCatalogo` y `ActualizarValorCatalogo`; `Routes()` monta `GET`/`POST /api/v1/catalogos-tipo/{tipo}` y `PATCH /api/v1/catalogos-tipo/{tipo}/{id}`. Cableado de `*tipos.Repositorio` en `New`/`Module`. Tipo inválido ⇒ validación (400); valor no encontrado ⇒ 404 (I3).
+- `internal/tipos/tipos_test.go` (nuevo): unitarias de `ValidarTipo` (acepta los cinco, rechaza desconocidos).
+- `internal/outbox_test.go`: dos unitarias nuevas para B2 (subtipo presente en `valor_catalogo`; ausente en entidades de una sola tabla).
+- `internal/tipos/tipos_integracion_test.go` (nuevo): integración contra Postgres — alta que emite evento con subtipo (P17/B2), desactivación que no rompe la historia (E5-HU-023/P8), lectura por lote acotada al tipo (C4/C6), y rechazo de tipo inválido. Se saltan sin `CATALOGOS_TEST_DB`.
+- `migrations/grants_integration_test.go`: aserciones de `valor_catalogo` (INSERT y cerrar vigencia permitidos; DELETE y UPDATE de otra columna denegados, P8).
+- `README.md`: `tipos` pasa a implementado; C8 cerrada en la tabla de brechas; sección de catálogos de tipo con el pendiente A1; corrección del diferido a V2 (geometría de zonas, no la lista; kit de seguridad retirado).
+
+**Verificado:** `go build ./...` y `go vet ./...` limpios; `gofmt` aplicado a los archivos nuevos/tocados. Pruebas unitarias en verde (`internal`, `internal/tipos`). Las pruebas de integración (`tipos`, `custodios`, `vehiculos`, `TestGrants`) requieren Postgres y `CATALOGOS_TEST_DB`; no se ejecutaron en este entorno (sin base), igual que compilan y siguen el patrón ya probado de E5-T1/T2.
+
+**Pendiente:** C5 y C10 siguen abiertas (otras historias). Autorización por rol de líneas (A1) anotada, sin implementar. `cmd/api` aún no aplica migraciones al arrancar (TODO).
+
+**Archivos modificados:**
+- `catalogos.go`
+- `internal/outbox.go`
+- `internal/outbox_test.go`
+- `internal/tipos/tipos.go`
+- `internal/tipos/tipos_test.go`
+- `internal/tipos/tipos_integracion_test.go`
+- `internal/tipos/doc.go`
+- `migrations/catalogos/0006_valor_catalogo.sql`
+- `migrations/catalogos/0007_valor_catalogo_grants.sql`
+- `migrations/grants_integration_test.go`
+- `README.md`
+
 ## 2026:10:15 (E5-T2 — superficie de custodios sobre tracer.8)
 
 **Resumen:** Se implementa la superficie completa del sub-módulo `custodios` (E5-T2 / AI27-74) sobre el contrato `v0.1.0-tracer.8`, espejando la vertical de vehículos de E5-T1. Lectura paginada y por lote, lectura vigente o a una fecha con `version`, aptitud informativa, y escritura administrativa `POST`/`PATCH` que versiona por vigencia (no sobrescribe, P8) y emite `catalogo.actualizado` en la misma transacción (P17). El custodio referencia al usuario de `identidad` por identificador (`usuario_id`), nunca por FK entre schemas (P1).
