@@ -1,5 +1,45 @@
 # CHANGELOG
 
+## 2026:10:15 (E5-T4 — contratos y SLA versionados por vigencia sobre tracer.8)
+
+**Resumen:** Se implementan los sub-módulos `contrato` (en `internal/clientes`) y `sla` (E5-T4 / AI27-76) sobre el contrato `v0.1.0-tracer.8`, que agregó su superficie HTTP. Ambos se versionan por vigencia (no se sobrescriben, P8) y publican `catalogo.actualizado` en la misma transacción (P17), mismo patrón que vehículos (E5-T1) y custodios (E5-T2). Son **INFORMATIVOS en V1** (DEC-022 #4, confirmado por Max en DEC-025): se registran para lectura administrativa y exportación probatoria, pero ningún flujo de E1 los consume para bloquear ni alertar. La lectura `?a_fecha` sostiene la exportación de un viaje cerrado: devuelve la versión que regía en esa fecha, no la actual.
+
+**Desajustes de contrato/BD resueltos (confirmados con PM):**
+- **`descripcion`:** los schemas `Contrato` y `Sla` del contrato declaran `descripcion`, pero las tablas de `0001_init.sql` no la tenían. Se agrega como columna opcional (0008).
+- **`contrato.estado`:** `0001` creó `estado NOT NULL`, pero el schema `Contrato` no lo expone en V1. Se relaja a NULL (0008) y queda como columna reservada no gobernada por la API; el alta no la escribe.
+- **Nota de contrato (no es un error):** el schema de respuesta `Contrato` NO lleva `descripcion` (solo `ContratoEntrada`/`ContratoCambios` la llevan, es de entrada). El schema `Sla` sí la expone en la respuesta pero NO lleva vigencia. La capa de BD persiste todo lo necesario; `escanearContratos`/`escanearSlas` leen las columnas internas (descripcion/vigencia) y solo exponen lo que su schema declara.
+
+**Cambios:**
+- `migrations/catalogos/0008_contrato_sla_cols.sql` (nuevo): `ADD COLUMN descripcion` a `contrato` y `sla`; `ALTER COLUMN estado DROP NOT NULL` en `contrato`. Las tablas y sus índices únicos parciales de versión vigente (`un_contrato_vigente_por_cliente`, `un_sla_vigente_por_contrato`) ya existían desde `0001`.
+- `internal/clientes/contrato.go` (nuevo): `RepositorioContrato` con `Obtener` (vigente o `?a_fecha`), `Crear` (versión 1 + outbox) y `Actualizar` (cierra vigencia + inserta versión+1 + outbox), con `pgx.BeginFunc` y P17/P8. `escanearContratos` mapea `version` y vigencia; `descripcion` se lee para arrastrarla en el PATCH pero no viaja en la respuesta (el schema no la declara).
+- `internal/clientes/doc.go`: contrato pasa de scaffold a implementado.
+- `internal/sla/sla.go` (nuevo): `Repositorio` con la misma forma, referenciando `contrato_id`. `escanearSlas` expone `descripcion` (sí está en el schema) y descarta la vigencia (no está en el schema).
+- `internal/sla/doc.go`: SLA pasa de scaffold a implementado.
+- `catalogos.go`: `ConsultasAPI.ObtenerContrato`/`ObtenerSla` dejan de devolver `errNoImplementado` y delegan en los repos (no encontrado ⇒ 404, I3); `ComandosAPI` gana `CrearContrato`/`ActualizarContrato`/`CrearSla`/`ActualizarSla`; `Routes()` monta `POST /api/v1/contratos`, `GET`/`PATCH /api/v1/contratos/{id}`, `POST /api/v1/sla`, `GET`/`PATCH /api/v1/sla/{id}` (lecturas con `?a_fecha`). Cableado de los repos en `New`/`Module`. Comentarios de `Routes` y `ConsultasAPI` actualizados.
+- `internal/clientes/contrato_integracion_test.go` (nuevo): alta que emite evento (P17), actualización que crea versión 2 sin sobrescribir y deja la 1 consultable `?a_fecha` (P8), y no-encontrado.
+- `internal/sla/sla_integracion_test.go` (nuevo): el criterio de aceptación central — `?a_fecha` dentro de la vigencia de la v1 devuelve el compromiso v1, no el actual (prueba el valor de `descripcion` entre versiones) — más outbox (P17) y no-encontrado.
+- `migrations/grants_integration_test.go`: aserciones de `contrato` y `sla` (INSERT y cerrar vigencia permitidos; el DELETE ya estaba denegado, P8).
+- No se agregó migración de grants: `0002` ya otorga `SELECT, INSERT` (de tabla, cubre la columna nueva) y `UPDATE (vigente_hasta)` sobre `contrato` y `sla`.
+
+**Verificado:** `go build ./...` y `go vet ./...` limpios. Suite completa ejecutada **contra Postgres 18 real** (contenedor efímero, `CATALOGOS_TEST_DB` apuntando a él) con `go test ./... -p 1`: en verde, incluyendo `internal/clientes`, `internal/sla` (con `TestSlaVigenteAUnaFecha`) y `TestGrants`.
+
+**Criterios de aceptación (DoD):**
+- "Lectura vigente a una fecha": cubierto por `TestSlaVigenteAUnaFecha` y `TestContratoActualizar_CreaNuevaVersionSinSobrescribir`.
+- "Cambiar el SLA no afecta el flujo de E1": `catalogos` es HOJA del grafo y NO contiene flujo de viaje; el flujo de E1 vive en `operacion`. La evidencia verificable del lado del código es que `operacion` **no referencia** `sla` ni `contrato` en ninguna parte (verificado por búsqueda: cero coincidencias de `sla`/`contrato` en `pf-svc-operacion/**/*.go`). Una prueba que ejecute el flujo completo "sin SLA vigente" debe vivir en `pf-svc-operacion`, no aquí; se señala como pendiente de ese repo (no es implementable honestamente dentro de `catalogos`).
+
+**Pendiente:** C5 (lectura por lote / expediente de cliente) sigue abierta. La prueba de flujo E1 sin SLA pertenece a `pf-svc-operacion`.
+
+**Archivos modificados:**
+- `catalogos.go`
+- `internal/clientes/contrato.go`
+- `internal/clientes/doc.go`
+- `internal/clientes/contrato_integracion_test.go`
+- `internal/sla/sla.go`
+- `internal/sla/doc.go`
+- `internal/sla/sla_integracion_test.go`
+- `migrations/catalogos/0008_contrato_sla_cols.sql`
+- `migrations/grants_integration_test.go`
+
 ## 2026:10:15 (E5-T3 — catálogos de tipo sobre tracer.8)
 
 **Resumen:** Se implementa el sub-módulo `tipos` (E5-T3 / AI27-75) sobre el contrato `v0.1.0-tracer.8`, que cerró la brecha C8 (recurso `/api/v1/catalogos-tipo/{tipo}`). Las cinco listas de valores de V1 (tipos de servicio, líneas de transporte, tipos de unidad —incluye `Patrulla`, ADR 31/DEC-044—, tipos de custodia y zonas de riesgo como lista sin geometría, DEC-017) viven en UNA sola tabla `valor_catalogo` parametrizada por `tipo` (opción A del contrato). Lectura por lote que devuelve `version` (C4/C6) y escritura administrativa `POST`/`PATCH` que versiona por vigencia (no sobrescribe, P8) y emite `catalogo.actualizado` en la misma transacción (P17). Desactivar un valor es un `PATCH` a `estado: inactivo` que crea una nueva versión y no rompe la historia (E5-HU-023).

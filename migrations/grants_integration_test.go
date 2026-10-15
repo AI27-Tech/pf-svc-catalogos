@@ -98,6 +98,24 @@ func TestGrants(t *testing.T) {
 		`INSERT INTO catalogos.vehiculo_documento (id, version, vehiculo_id, clase) VALUES (gen_random_uuid(), 1, '33333333-3333-3333-3333-333333333333', 'poliza')`,
 		"svc_catalogos debe poder insertar un documento de vehículo")
 
+	// Contrato y SLA (0008, E5-T4): mismo patrón de versionado por vigencia (P8).
+	// El INSERT omite `estado` (0008 lo relajó a NULL): el schema del contrato no
+	// lo expone. `descripcion` es la columna que 0008 agregó.
+	contratoID := "66666666-6666-6666-6666-666666666666"
+	mustExec(t, ctx, pool,
+		fmt.Sprintf(`INSERT INTO catalogos.contrato (id, version, cliente_id, descripcion) VALUES ('%s', 1, '%s', 'marco')`, contratoID, clienteID),
+		"svc_catalogos debe poder insertar una versión de contrato")
+	mustExec(t, ctx, pool,
+		fmt.Sprintf(`UPDATE catalogos.contrato SET vigente_hasta = now() WHERE id = '%s' AND version = 1`, contratoID),
+		"svc_catalogos debe poder cerrar la vigencia de un contrato")
+	slaID := "77777777-7777-7777-7777-777777777777"
+	mustExec(t, ctx, pool,
+		fmt.Sprintf(`INSERT INTO catalogos.sla (id, version, contrato_id, descripcion) VALUES ('%s', 1, '%s', 'respuesta en 30 min')`, slaID, contratoID),
+		"svc_catalogos debe poder insertar una versión de SLA")
+	mustExec(t, ctx, pool,
+		fmt.Sprintf(`UPDATE catalogos.sla SET vigente_hasta = now() WHERE id = '%s' AND version = 1`, slaID),
+		"svc_catalogos debe poder cerrar la vigencia de un SLA")
+
 	// Valor de catálogo de tipo (0006/0007): mismo patrón de versionado (P8).
 	valorID := "55555555-5555-5555-5555-555555555555"
 	mustExec(t, ctx, pool,

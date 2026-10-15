@@ -6,11 +6,12 @@ custodios y catálogos de tipo—. Es una **hoja del grafo** (`catalogo -> []`):
 no llama a `operacion` ni a ningún módulo de dominio. Vive dentro del deployable
 `core`.
 
-Estado: los sub-módulos `vehiculos` (E5-T1), `custodios` (E5-T2) y `tipos`
-(E5-T3, catálogos de tipo) están **implementados** sobre el contrato
-`v0.1.0-tracer.8` (lectura por lote, lectura a una fecha donde aplica, aptitud
-informativa, y escritura `POST`/`PATCH` con outbox en la misma transacción).
-El resto de los sub-módulos (`clientes`, `sla`) siguen en scaffolding.
+Estado: los sub-módulos `vehiculos` (E5-T1), `custodios` (E5-T2), `tipos`
+(E5-T3, catálogos de tipo) y `contrato`/`sla` (E5-T4) están **implementados**
+sobre el contrato `v0.1.0-tracer.8` (lectura por lote donde aplica, lectura a
+una fecha, aptitud informativa, y escritura `POST`/`PATCH` con outbox en la
+misma transacción). El contrato vive en el paquete `clientes`; su lectura de
+**expediente de cliente** sigue en scaffolding (brecha C5).
 
 ## Frontera (ADR 31)
 
@@ -53,13 +54,13 @@ historia ni `DELETE` en firme (P8).
 Verificado contra `pf-pkg-contracts` en `v0.1.0-tracer.8` (contrato pinned). Lo
 presente se implementa; lo ausente se reporta y **no se escribe a mano**
 (contrato primero, 00 regla 6). Las superficies de vehículos (E5-T1), custodios
-(E5-T2) y catálogos de tipo (E5-T3) ya están cerradas e implementadas; quedan
-abiertas C5 y C10 (otras historias).
+(E5-T2), catálogos de tipo (E5-T3) y contratos/SLA (E5-T4) ya están cerradas e
+implementadas; quedan abiertas C5 y C10 (otras historias).
 
 | # | Superficie | Estado en tracer.8 | Efecto |
 |---|---|---|---|
 | C1 | Cliente Go `api-client-go/catalogos` | ✅ presente | — |
-| C2 | Lectura de clientes, contrato, SLA | ✅ presente | implementable |
+| C2 | Lectura y escritura de contrato/SLA (y lectura de cliente) | ✅ presente | contrato/SLA implementados (E5-T4): `GET`/`POST`/`PATCH /contratos` y `/sla`, lectura `?a_fecha`, outbox (P17). Lectura de expediente de cliente aún en scaffold |
 | C11 | Aptitud de custodio y vehículo | ✅ presente | lectura informativa (DEC-055) |
 | C3 | Átomo **vehículo** (ADR 31) en lugar de `Unidad` (ADR 24) | ✅ cerrada en tracer.4 | `/api/v1/vehiculos`, schema `Vehiculo`; paquete `vehiculos` implementado (E5-T1) |
 | C4 | Lectura por lote de vehículos **y custodios** | ✅ vehículos en tracer.5, custodios en tracer.8 | `GET /vehiculos?ids=...` y `GET /custodios?ids=...` implementados |
@@ -67,13 +68,14 @@ abiertas C5 y C10 (otras historias).
 | C7 | Superficie admin `POST`/`PATCH` de vehículos **y custodios** | ✅ vehículos en tracer.5, custodios en tracer.8 | `crear/actualizarVehiculo` y `crear/actualizarCustodio` con outbox (P17) implementados |
 | C9 | Lectura a una fecha de vehículos **y custodios** | ✅ vehículos en tracer.5, custodios en tracer.8 | `GET /{vehiculos,custodios}/{id}?a_fecha=...` implementado |
 | C8 | Catálogos de tipo (tipos, líneas, unidad, custodia, zonas lista) | ✅ cerrada en tracer.8 | `/api/v1/catalogos-tipo/{tipo}`, schema `ValorCatalogo`; paquete `tipos` implementado (E5-T3) |
-| C5 | Lectura por lote de clientes/contratos/SLA | ❌ falta | bloquea lecturas `:lote` de `bff`/`reportes`/`mensajeria` |
+| C5 | Lectura **por lote** de clientes/contratos/SLA, y expediente de cliente | ❌ falta | la lectura puntual de contrato/SLA ya existe (C2/E5-T4); falta el lote y el expediente de cliente — bloquea lecturas `:lote` de `bff`/`reportes`/`mensajeria` |
 | C10 | `catalogo.actualizado` con **versión** | ❌ falta (proto sin campo versión) | la versión viaja en el sobre de dominio; el payload del evento se alineará cuando el contrato la agregue |
 
 C3/C4/C6/C7/C9 para vehículos (E5-T1) se cerraron en `tracer.5`; las mismas
-superficies para custodios (E5-T2) y la superficie de catálogos de tipo C8
-(E5-T3) en `tracer.8`, y ya están implementadas. C5 (lote de otros agregados) y
-C10 (versión en el evento) siguen abiertas: son otras historias.
+superficies para custodios (E5-T2), la superficie de catálogos de tipo C8
+(E5-T3) y la de contratos/SLA (C2/E5-T4) en `tracer.8`, y ya están
+implementadas. C5 (lote de otros agregados y expediente de cliente) y C10
+(versión en el evento) siguen abiertas: son otras historias.
 
 ### Pendientes de modelado reportados en E5-T2 (no resueltos aquí)
 

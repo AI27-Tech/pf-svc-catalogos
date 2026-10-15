@@ -26,7 +26,9 @@ import (
 	platformerrors "github.com/AI27-Tech/pf-pkg-platform-go/errors"
 	"github.com/AI27-Tech/pf-pkg-platform-go/pgxpool"
 	"github.com/AI27-Tech/pf-pkg-platform-go/worker"
+	"github.com/AI27-Tech/pf-svc-catalogos/internal/clientes"
 	"github.com/AI27-Tech/pf-svc-catalogos/internal/custodios"
+	"github.com/AI27-Tech/pf-svc-catalogos/internal/sla"
 	"github.com/AI27-Tech/pf-svc-catalogos/internal/tipos"
 	"github.com/AI27-Tech/pf-svc-catalogos/internal/vehiculos"
 	"github.com/google/uuid"
@@ -81,6 +83,8 @@ type Module struct {
 	vehiculos *vehiculos.Repositorio
 	custodios *custodios.Repositorio
 	tipos     *tipos.Repositorio
+	contratos *clientes.RepositorioContrato
+	sla       *sla.Repositorio
 }
 
 // New construye el módulo con sus pools y puertos ya resueltos. No lee entorno
@@ -92,14 +96,17 @@ func New(p Pools, d Deps) (*Module, error) {
 		vehiculos: vehiculos.NewRepositorio(p.Catalogos),
 		custodios: custodios.NewRepositorio(p.Catalogos),
 		tipos:     tipos.NewRepositorio(p.Catalogos),
+		contratos: clientes.NewRepositorioContrato(p.Catalogos),
+		sla:       sla.NewRepositorio(p.Catalogos),
 	}, nil
 }
 
 // Routes monta las rutas HTTP del módulo bajo /api/v1/... en el mux dado. Solo
 // monta las operaciones presentes en la versión fijada de catalogos.yaml
 // (contrato primero, 00 regla 6). Hoy monta vehículos (E5-T1), custodios
-// (E5-T2) y catálogos de tipo (E5-T3), ya cerradas en tracer.8. Las lecturas de
-// cliente/contrato/SLA siguen en scaffold (brecha C5), así que no se montan.
+// (E5-T2), catálogos de tipo (E5-T3) y contratos/SLA (E5-T4), todas cerradas en
+// tracer.8. La lectura de expediente de cliente sigue en scaffold (brecha C5),
+// así que no se monta.
 func (m *Module) Routes(mux *http.ServeMux) {
 	// Vehículos (superficie completa de E5-T1 sobre tracer.6). Los handlers
 	// delegan en los MISMOS casos de uso que Consultas()/Comandos() (I3): el
@@ -398,6 +405,122 @@ func (m *Module) Routes(mux *http.ServeMux) {
 		}
 		escribirJSON(w, http.StatusOK, v)
 	})
+
+	// --- Contratos y SLA (superficie completa de E5-T4 sobre tracer.8). Mismo
+	// patrón de versionado que vehículos y custodios. INFORMATIVOS en V1 (DEC-022
+	// #4 / DEC-025): la lectura `?a_fecha` sostiene la exportación probatoria (P8);
+	// ningún flujo de E1 los consume para bloquear ni alertar. Los handlers
+	// delegan en los MISMOS casos de uso que Consultas()/Comandos() (I3).
+
+	// POST /api/v1/contratos — alta (crea la versión 1).
+	mux.HandleFunc("POST /api/v1/contratos", func(w http.ResponseWriter, r *http.Request) {
+		var entrada catclient.ContratoEntrada
+		if err := json.NewDecoder(r.Body).Decode(&entrada); err != nil {
+			escribirError(w, platformerrors.NewValidacion("cuerpo inválido"))
+			return
+		}
+		ct, err := cmd.CrearContrato(r.Context(), entrada)
+		if err != nil {
+			escribirError(w, err)
+			return
+		}
+		escribirJSON(w, http.StatusCreated, ct)
+	})
+
+	// GET /api/v1/contratos/{id} — vigente, o ?a_fecha (lectura probatoria P8).
+	mux.HandleFunc("GET /api/v1/contratos/{id}", func(w http.ResponseWriter, r *http.Request) {
+		id, err := uuid.Parse(r.PathValue("id"))
+		if err != nil {
+			escribirError(w, platformerrors.NewValidacion("id de contrato inválido"))
+			return
+		}
+		aFecha, err := parsearAFecha(r.URL.Query().Get("a_fecha"))
+		if err != nil {
+			escribirError(w, err)
+			return
+		}
+		ct, err := q.ObtenerContrato(r.Context(), id, aFecha)
+		if err != nil {
+			escribirError(w, err)
+			return
+		}
+		escribirJSON(w, http.StatusOK, ct)
+	})
+
+	// PATCH /api/v1/contratos/{id} — nueva versión.
+	mux.HandleFunc("PATCH /api/v1/contratos/{id}", func(w http.ResponseWriter, r *http.Request) {
+		id, err := uuid.Parse(r.PathValue("id"))
+		if err != nil {
+			escribirError(w, platformerrors.NewValidacion("id de contrato inválido"))
+			return
+		}
+		var cambios catclient.ContratoCambios
+		if err := json.NewDecoder(r.Body).Decode(&cambios); err != nil {
+			escribirError(w, platformerrors.NewValidacion("cuerpo inválido"))
+			return
+		}
+		ct, err := cmd.ActualizarContrato(r.Context(), id, cambios)
+		if err != nil {
+			escribirError(w, err)
+			return
+		}
+		escribirJSON(w, http.StatusOK, ct)
+	})
+
+	// POST /api/v1/sla — alta (crea la versión 1).
+	mux.HandleFunc("POST /api/v1/sla", func(w http.ResponseWriter, r *http.Request) {
+		var entrada catclient.SlaEntrada
+		if err := json.NewDecoder(r.Body).Decode(&entrada); err != nil {
+			escribirError(w, platformerrors.NewValidacion("cuerpo inválido"))
+			return
+		}
+		s, err := cmd.CrearSla(r.Context(), entrada)
+		if err != nil {
+			escribirError(w, err)
+			return
+		}
+		escribirJSON(w, http.StatusCreated, s)
+	})
+
+	// GET /api/v1/sla/{id} — vigente, o ?a_fecha (criterio de aceptación E5-T4).
+	mux.HandleFunc("GET /api/v1/sla/{id}", func(w http.ResponseWriter, r *http.Request) {
+		id, err := uuid.Parse(r.PathValue("id"))
+		if err != nil {
+			escribirError(w, platformerrors.NewValidacion("id de sla inválido"))
+			return
+		}
+		aFecha, err := parsearAFecha(r.URL.Query().Get("a_fecha"))
+		if err != nil {
+			escribirError(w, err)
+			return
+		}
+		s, err := q.ObtenerSla(r.Context(), id, aFecha)
+		if err != nil {
+			escribirError(w, err)
+			return
+		}
+		escribirJSON(w, http.StatusOK, s)
+	})
+
+	// PATCH /api/v1/sla/{id} — nueva versión.
+	mux.HandleFunc("PATCH /api/v1/sla/{id}", func(w http.ResponseWriter, r *http.Request) {
+		id, err := uuid.Parse(r.PathValue("id"))
+		if err != nil {
+			escribirError(w, platformerrors.NewValidacion("id de sla inválido"))
+			return
+		}
+		var cambios catclient.SlaCambios
+		if err := json.NewDecoder(r.Body).Decode(&cambios); err != nil {
+			escribirError(w, platformerrors.NewValidacion("cuerpo inválido"))
+			return
+		}
+		s, err := cmd.ActualizarSla(r.Context(), id, cambios)
+		if err != nil {
+			escribirError(w, err)
+			return
+		}
+		escribirJSON(w, http.StatusOK, s)
+	})
 }
 
 // parsearIDs convierte la lista separada por coma del query param `ids` a UUIDs.
@@ -498,9 +621,10 @@ func (m *Module) Consultas() ConsultasAPI {
 //
 // Expone lo que el contrato tracer.8 ya tiene para catalogos: la superficie de
 // vehículos (E5-T1) y custodios (E5-T2) —listado paginado y por lote, lectura
-// vigente o a una fecha, y aptitud—, y la lectura por lote de los catálogos de
-// tipo (E5-T3). La lectura de cliente/contrato/SLA sigue declarada pero en
-// scaffold. El átomo es `Vehiculo` (ADR 31 §5), no `Unidad`, y la aptitud se
+// vigente o a una fecha, y aptitud—, la lectura por lote de los catálogos de
+// tipo (E5-T3), y la lectura de contrato/SLA vigente o a una fecha (E5-T4). La
+// lectura del expediente de cliente sigue declarada pero en scaffold. El átomo
+// es `Vehiculo` (ADR 31 §5), no `Unidad`, y la aptitud se
 // evalúa contra el contrato/SLA de un cliente (de ahí `clienteID`). La aptitud
 // es INFORMATIVA (DEC-055): nunca gatea.
 type ConsultasAPI interface {
@@ -562,6 +686,22 @@ type ComandosAPI interface {
 	// sobrescribir la anterior (P8). Desactivar un valor es enviar estado
 	// `inactivo` por esta vía: no rompe los registros históricos (E5-HU-023).
 	ActualizarValorCatalogo(ctx context.Context, tipo catclient.TipoCatalogo, id catclient.Id, c catclient.ValorCatalogoCambios) (*catclient.ValorCatalogo, error)
+	// CrearContrato da de alta un contrato (versión 1) para un cliente. clienteID
+	// se toma del cuerpo (ContratoEntrada.ClienteId). INFORMATIVO en V1 (DEC-022
+	// #4): no condiciona ningún flujo de E1.
+	CrearContrato(ctx context.Context, e catclient.ContratoEntrada) (*catclient.Contrato, error)
+	// ActualizarContrato crea una nueva versión con los campos presentes, sin
+	// sobrescribir la anterior (P8): la versión previa sigue consultable con
+	// `?a_fecha`.
+	ActualizarContrato(ctx context.Context, id catclient.Id, c catclient.ContratoCambios) (*catclient.Contrato, error)
+	// CrearSla da de alta un SLA (versión 1) de un contrato. contratoID se toma
+	// del cuerpo (SlaEntrada.ContratoId). INFORMATIVO en V1 (DEC-022 #4 / DEC-025):
+	// se registra, no se vigila ni alerta.
+	CrearSla(ctx context.Context, e catclient.SlaEntrada) (*catclient.Sla, error)
+	// ActualizarSla crea una nueva versión con los campos presentes, sin
+	// sobrescribir la anterior (P8): la versión previa sigue consultable con
+	// `?a_fecha`.
+	ActualizarSla(ctx context.Context, id catclient.Id, c catclient.SlaCambios) (*catclient.Sla, error)
 }
 
 // Comandos expone la superficie de escritura administrativa.
@@ -581,11 +721,25 @@ func (c *consultas) ObtenerCliente(ctx context.Context, id catclient.Id) (*catcl
 }
 
 func (c *consultas) ObtenerContrato(ctx context.Context, id catclient.Id, aFecha *catclient.MarcaTiempo) (*catclient.Contrato, error) {
-	return nil, errNoImplementado("ObtenerContrato")
+	ct, err := c.m.contratos.Obtener(ctx, id, aFecha)
+	if errors.Is(err, clientes.ErrContratoNoEncontrado) {
+		return nil, platformerrors.NewNoEncontrado("contrato no encontrado")
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &ct, nil
 }
 
 func (c *consultas) ObtenerSla(ctx context.Context, id catclient.Id, aFecha *catclient.MarcaTiempo) (*catclient.Sla, error) {
-	return nil, errNoImplementado("ObtenerSla")
+	s, err := c.m.sla.Obtener(ctx, id, aFecha)
+	if errors.Is(err, sla.ErrNoEncontrado) {
+		return nil, platformerrors.NewNoEncontrado("sla no encontrado")
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &s, nil
 }
 
 func (c *consultas) ListarVehiculos(ctx context.Context, cursor *catclient.Cursor) (*catclient.PaginaVehiculos, error) {
@@ -746,4 +900,42 @@ func (c *comandos) ActualizarValorCatalogo(ctx context.Context, tipo catclient.T
 		return nil, err
 	}
 	return &v, nil
+}
+
+func (c *comandos) CrearContrato(ctx context.Context, e catclient.ContratoEntrada) (*catclient.Contrato, error) {
+	ct, err := c.m.contratos.Crear(ctx, e)
+	if err != nil {
+		return nil, err
+	}
+	return &ct, nil
+}
+
+func (c *comandos) ActualizarContrato(ctx context.Context, id catclient.Id, cambios catclient.ContratoCambios) (*catclient.Contrato, error) {
+	ct, err := c.m.contratos.Actualizar(ctx, id, cambios, time.Now())
+	if errors.Is(err, clientes.ErrContratoNoEncontrado) {
+		return nil, platformerrors.NewNoEncontrado("contrato no encontrado")
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &ct, nil
+}
+
+func (c *comandos) CrearSla(ctx context.Context, e catclient.SlaEntrada) (*catclient.Sla, error) {
+	s, err := c.m.sla.Crear(ctx, e)
+	if err != nil {
+		return nil, err
+	}
+	return &s, nil
+}
+
+func (c *comandos) ActualizarSla(ctx context.Context, id catclient.Id, cambios catclient.SlaCambios) (*catclient.Sla, error) {
+	s, err := c.m.sla.Actualizar(ctx, id, cambios, time.Now())
+	if errors.Is(err, sla.ErrNoEncontrado) {
+		return nil, platformerrors.NewNoEncontrado("sla no encontrado")
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &s, nil
 }
