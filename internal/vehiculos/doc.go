@@ -7,14 +7,13 @@
 // (ADR 31, invariantes). La `unidad` (paquete vehículo + custodios), su roster,
 // disponibilidad y reserva son de operacion, NO de aquí.
 //
-// NOMBRE DE TRABAJO: "vehiculos" es provisional. El nombre canónico del átomo
-// (paquete, tabla, ruta) se fija en pf-pkg-contracts (brecha C3) y en
-// naming-conventions.md; no se fija por inferencia aquí.
-//
-// BLOQUEADO (brecha C3): el contrato tracer.3 todavía modela `/api/v1/unidades`
-// con el modelo viejo de ADR 24 ("vehículos de flota"), no el átomo vehículo de
-// ADR 31. Hasta que el contrato se reconcilie (ola 1, tracer.4) no hay tabla
-// `vehiculo` ni rutas propias: este paquete queda sin implementación. La aptitud
-// presente en el contrato (aptitudUnidad) se expone en Consultas() como lectura
-// informativa (DEC-055), a la espera de pasar a vehículo con C3.
+// Sobre el contrato v0.1.0-tracer.6 (brecha C3 cerrada: el átomo vive en
+// /api/v1/vehiculos). Implementa la superficie completa de E5-T1:
+//   - lectura paginada por cursor y lectura por lote (C4);
+//   - lectura vigente o "a una fecha" (C9), con `version` en la respuesta (C6);
+//   - aptitud informativa (DEC-055), evaluada contra el contrato/SLA de un
+//     cliente (de ahí clienteID);
+//   - escritura administrativa `crearVehiculo`/`actualizarVehiculo` (C7), que
+//     versiona por vigencia (nunca sobrescribe, P8) y emite
+//     `catalogo.actualizado` en la misma transacción (P17).
 package vehiculos

@@ -16,12 +16,22 @@ package catalogos
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"net/http"
+	"strings"
 	"time"
 
 	catclient "github.com/AI27-Tech/pf-pkg-contracts/packages/api-client-go/catalogos"
+	platformerrors "github.com/AI27-Tech/pf-pkg-platform-go/errors"
 	"github.com/AI27-Tech/pf-pkg-platform-go/pgxpool"
 	"github.com/AI27-Tech/pf-pkg-platform-go/worker"
+	"github.com/AI27-Tech/pf-svc-catalogos/internal/clientes"
+	"github.com/AI27-Tech/pf-svc-catalogos/internal/custodios"
+	"github.com/AI27-Tech/pf-svc-catalogos/internal/sla"
+	"github.com/AI27-Tech/pf-svc-catalogos/internal/tipos"
+	"github.com/AI27-Tech/pf-svc-catalogos/internal/vehiculos"
+	"github.com/google/uuid"
 )
 
 // Pools agrupa los pools por rol que el módulo necesita. catalogos usa un solo
@@ -69,24 +79,541 @@ const PresupuestoRevocacion = 2 * time.Second
 type Module struct {
 	pools Pools
 	deps  Deps
-	// Aquí vivirán los casos de uso de cada sub-módulo cuando se implementen.
+	// Casos de uso por sub-módulo. Se van agregando conforme se implementan.
+	vehiculos *vehiculos.Repositorio
+	custodios *custodios.Repositorio
+	tipos     *tipos.Repositorio
+	contratos *clientes.RepositorioContrato
+	clientes  *clientes.RepositorioCliente
+	sla       *sla.Repositorio
 }
 
 // New construye el módulo con sus pools y puertos ya resueltos. No lee entorno
 // (00 regla 4): la raíz le pasa todo construido.
 func New(p Pools, d Deps) (*Module, error) {
-	return &Module{pools: p, deps: d}, nil
+	return &Module{
+		pools:     p,
+		deps:      d,
+		vehiculos: vehiculos.NewRepositorio(p.Catalogos),
+		custodios: custodios.NewRepositorio(p.Catalogos),
+		tipos:     tipos.NewRepositorio(p.Catalogos),
+		contratos: clientes.NewRepositorioContrato(p.Catalogos),
+		clientes:  clientes.NewRepositorioCliente(p.Catalogos),
+		sla:       sla.NewRepositorio(p.Catalogos),
+	}, nil
 }
 
-// Routes monta las rutas HTTP del módulo bajo /api/v1/... en el mux dado.
-// Scaffolding: hoy no monta ninguna ruta de negocio. Las rutas se agregan una a
-// una conforme se implementen los casos de uso, y SOLO las presentes en la
-// versión fijada de catalogos.yaml (contrato primero). Las rutas de vehículo,
-// lote, administración y catálogos de tipo están bloqueadas por brechas de
-// contrato (ver README, brechas C3–C10).
+// Routes monta las rutas HTTP del módulo bajo /api/v1/... en el mux dado. Solo
+// monta las operaciones presentes en la versión fijada de catalogos.yaml
+// (contrato primero, 00 regla 6). Hoy monta vehículos (E5-T1), custodios
+// (E5-T2), catálogos de tipo (E5-T3) y contratos/SLA (E5-T4), todas cerradas en
+// tracer.8. El listado de clientes (selector, E8-T11) también se monta; el
+// obtener-expediente de cliente sigue en scaffold (brecha C5).
 func (m *Module) Routes(mux *http.ServeMux) {
-	// TODO(catalogos): montar handlers conforme se implementen los casos de uso,
-	// delegando en los mismos casos de uso que Consultas() (I3).
+	// Vehículos (superficie completa de E5-T1 sobre tracer.6). Los handlers
+	// delegan en los MISMOS casos de uso que Consultas()/Comandos() (I3): el
+	// adaptador HTTP y el en-proceso no divergen.
+	q := m.Consultas()
+	cmd := m.Comandos()
+
+	// GET /api/v1/vehiculos — listado paginado, o lote si viene ?ids (C4).
+	// `ids` y `cursor` son mutuamente excluyentes (contrato); con ambos, 400.
+	mux.HandleFunc("GET /api/v1/vehiculos", func(w http.ResponseWriter, r *http.Request) {
+		idsRaw := r.URL.Query().Get("ids")
+		cursorRaw := r.URL.Query().Get("cursor")
+		if idsRaw != "" && cursorRaw != "" {
+			escribirError(w, platformerrors.NewValidacion("ids y cursor son mutuamente excluyentes"))
+			return
+		}
+		if idsRaw != "" {
+			ids, err := parsearIDs(idsRaw)
+			if err != nil {
+				escribirError(w, err)
+				return
+			}
+			pag, err := q.ListarVehiculosPorLote(r.Context(), ids)
+			if err != nil {
+				escribirError(w, err)
+				return
+			}
+			escribirJSON(w, http.StatusOK, pag)
+			return
+		}
+		var cursor *catclient.Cursor
+		if cursorRaw != "" {
+			cursor = &cursorRaw
+		}
+		pag, err := q.ListarVehiculos(r.Context(), cursor)
+		if err != nil {
+			escribirError(w, err)
+			return
+		}
+		escribirJSON(w, http.StatusOK, pag)
+	})
+
+	// POST /api/v1/vehiculos — alta.
+	mux.HandleFunc("POST /api/v1/vehiculos", func(w http.ResponseWriter, r *http.Request) {
+		var entrada catclient.VehiculoEntrada
+		if err := json.NewDecoder(r.Body).Decode(&entrada); err != nil {
+			escribirError(w, platformerrors.NewValidacion("cuerpo inválido"))
+			return
+		}
+		v, err := cmd.CrearVehiculo(r.Context(), entrada)
+		if err != nil {
+			escribirError(w, err)
+			return
+		}
+		escribirJSON(w, http.StatusCreated, v)
+	})
+
+	// GET /api/v1/vehiculos/{id} — vigente, o ?a_fecha (C9).
+	mux.HandleFunc("GET /api/v1/vehiculos/{id}", func(w http.ResponseWriter, r *http.Request) {
+		id, err := uuid.Parse(r.PathValue("id"))
+		if err != nil {
+			escribirError(w, platformerrors.NewValidacion("id de vehículo inválido"))
+			return
+		}
+		aFecha, err := parsearAFecha(r.URL.Query().Get("a_fecha"))
+		if err != nil {
+			escribirError(w, err)
+			return
+		}
+		v, err := q.ObtenerVehiculo(r.Context(), id, aFecha)
+		if err != nil {
+			escribirError(w, err)
+			return
+		}
+		escribirJSON(w, http.StatusOK, v)
+	})
+
+	// PATCH /api/v1/vehiculos/{id} — nueva versión.
+	mux.HandleFunc("PATCH /api/v1/vehiculos/{id}", func(w http.ResponseWriter, r *http.Request) {
+		id, err := uuid.Parse(r.PathValue("id"))
+		if err != nil {
+			escribirError(w, platformerrors.NewValidacion("id de vehículo inválido"))
+			return
+		}
+		var cambios catclient.VehiculoCambios
+		if err := json.NewDecoder(r.Body).Decode(&cambios); err != nil {
+			escribirError(w, platformerrors.NewValidacion("cuerpo inválido"))
+			return
+		}
+		v, err := cmd.ActualizarVehiculo(r.Context(), id, cambios)
+		if err != nil {
+			escribirError(w, err)
+			return
+		}
+		escribirJSON(w, http.StatusOK, v)
+	})
+
+	// GET /api/v1/vehiculos/{id}/aptitud — aptitud informativa.
+	mux.HandleFunc("GET /api/v1/vehiculos/{id}/aptitud", func(w http.ResponseWriter, r *http.Request) {
+		id, err := uuid.Parse(r.PathValue("id"))
+		if err != nil {
+			escribirError(w, platformerrors.NewValidacion("id de vehículo inválido"))
+			return
+		}
+		clienteRaw := r.URL.Query().Get("cliente_id")
+		if clienteRaw == "" {
+			escribirError(w, platformerrors.NewValidacion("cliente_id es obligatorio"))
+			return
+		}
+		clienteID, err := uuid.Parse(clienteRaw)
+		if err != nil {
+			escribirError(w, platformerrors.NewValidacion("cliente_id inválido"))
+			return
+		}
+		ap, err := q.AptitudVehiculo(r.Context(), id, clienteID)
+		if err != nil {
+			escribirError(w, err)
+			return
+		}
+		escribirJSON(w, http.StatusOK, ap)
+	})
+
+	// --- Clientes (selector de cliente para crear un viaje por Operación, E8-T11).
+	// Solo lectura: GET /api/v1/clientes, paginado por cursor, solo clientes
+	// activos (DEC-101 #1). NO se proyecta ?ids (es la lectura por lote, no un
+	// selector); el alcance del jefe_operativo lo aplican bff/operacion
+	// (DEC-101 #2), no catalogos.
+	mux.HandleFunc("GET /api/v1/clientes", func(w http.ResponseWriter, r *http.Request) {
+		var cursor *catclient.Cursor
+		if cursorRaw := r.URL.Query().Get("cursor"); cursorRaw != "" {
+			cursor = &cursorRaw
+		}
+		pag, err := q.ListarClientes(r.Context(), cursor)
+		if err != nil {
+			escribirError(w, err)
+			return
+		}
+		escribirJSON(w, http.StatusOK, pag)
+	})
+
+	// --- Custodios (superficie completa de E5-T2). Mismo patrón que vehículos:
+	// los handlers delegan en los MISMOS casos de uso que Consultas()/Comandos()
+	// (I3).
+
+	// GET /api/v1/custodios — listado paginado, o lote si viene ?ids (C4).
+	// `ids` y `cursor` son mutuamente excluyentes (contrato); con ambos, 400.
+	mux.HandleFunc("GET /api/v1/custodios", func(w http.ResponseWriter, r *http.Request) {
+		idsRaw := r.URL.Query().Get("ids")
+		cursorRaw := r.URL.Query().Get("cursor")
+		if idsRaw != "" && cursorRaw != "" {
+			escribirError(w, platformerrors.NewValidacion("ids y cursor son mutuamente excluyentes"))
+			return
+		}
+		if idsRaw != "" {
+			ids, err := parsearIDs(idsRaw)
+			if err != nil {
+				escribirError(w, err)
+				return
+			}
+			pag, err := q.ListarCustodiosPorLote(r.Context(), ids)
+			if err != nil {
+				escribirError(w, err)
+				return
+			}
+			escribirJSON(w, http.StatusOK, pag)
+			return
+		}
+		var cursor *catclient.Cursor
+		if cursorRaw != "" {
+			cursor = &cursorRaw
+		}
+		pag, err := q.ListarCustodios(r.Context(), cursor)
+		if err != nil {
+			escribirError(w, err)
+			return
+		}
+		escribirJSON(w, http.StatusOK, pag)
+	})
+
+	// POST /api/v1/custodios — alta.
+	mux.HandleFunc("POST /api/v1/custodios", func(w http.ResponseWriter, r *http.Request) {
+		var entrada catclient.CustodioEntrada
+		if err := json.NewDecoder(r.Body).Decode(&entrada); err != nil {
+			escribirError(w, platformerrors.NewValidacion("cuerpo inválido"))
+			return
+		}
+		cst, err := cmd.CrearCustodio(r.Context(), entrada)
+		if err != nil {
+			escribirError(w, err)
+			return
+		}
+		escribirJSON(w, http.StatusCreated, cst)
+	})
+
+	// GET /api/v1/custodios/{id} — vigente, o ?a_fecha (C9).
+	mux.HandleFunc("GET /api/v1/custodios/{id}", func(w http.ResponseWriter, r *http.Request) {
+		id, err := uuid.Parse(r.PathValue("id"))
+		if err != nil {
+			escribirError(w, platformerrors.NewValidacion("id de custodio inválido"))
+			return
+		}
+		aFecha, err := parsearAFecha(r.URL.Query().Get("a_fecha"))
+		if err != nil {
+			escribirError(w, err)
+			return
+		}
+		cst, err := q.ObtenerCustodio(r.Context(), id, aFecha)
+		if err != nil {
+			escribirError(w, err)
+			return
+		}
+		escribirJSON(w, http.StatusOK, cst)
+	})
+
+	// PATCH /api/v1/custodios/{id} — nueva versión.
+	mux.HandleFunc("PATCH /api/v1/custodios/{id}", func(w http.ResponseWriter, r *http.Request) {
+		id, err := uuid.Parse(r.PathValue("id"))
+		if err != nil {
+			escribirError(w, platformerrors.NewValidacion("id de custodio inválido"))
+			return
+		}
+		var cambios catclient.CustodioCambios
+		if err := json.NewDecoder(r.Body).Decode(&cambios); err != nil {
+			escribirError(w, platformerrors.NewValidacion("cuerpo inválido"))
+			return
+		}
+		cst, err := cmd.ActualizarCustodio(r.Context(), id, cambios)
+		if err != nil {
+			escribirError(w, err)
+			return
+		}
+		escribirJSON(w, http.StatusOK, cst)
+	})
+
+	// GET /api/v1/custodios/{id}/aptitud — aptitud informativa (DEC-055).
+	mux.HandleFunc("GET /api/v1/custodios/{id}/aptitud", func(w http.ResponseWriter, r *http.Request) {
+		id, err := uuid.Parse(r.PathValue("id"))
+		if err != nil {
+			escribirError(w, platformerrors.NewValidacion("id de custodio inválido"))
+			return
+		}
+		clienteRaw := r.URL.Query().Get("cliente_id")
+		if clienteRaw == "" {
+			escribirError(w, platformerrors.NewValidacion("cliente_id es obligatorio"))
+			return
+		}
+		clienteID, err := uuid.Parse(clienteRaw)
+		if err != nil {
+			escribirError(w, platformerrors.NewValidacion("cliente_id inválido"))
+			return
+		}
+		ap, err := q.AptitudCustodio(r.Context(), id, clienteID)
+		if err != nil {
+			escribirError(w, err)
+			return
+		}
+		escribirJSON(w, http.StatusOK, ap)
+	})
+
+	// --- Catálogos de tipo (E5-T3). UN solo recurso parametrizado por `{tipo}`
+	// para las cinco listas de valores de V1 (contrato tracer.8, opción A). El
+	// `{tipo}` se valida contra el enum TipoCatalogo; uno inválido es 400 (no
+	// 404), porque es un valor de ruta mal formado, no un recurso ausente.
+
+	// GET /api/v1/catalogos-tipo/{tipo} — lectura por lote (paginada por cursor).
+	mux.HandleFunc("GET /api/v1/catalogos-tipo/{tipo}", func(w http.ResponseWriter, r *http.Request) {
+		tipo := catclient.TipoCatalogo(r.PathValue("tipo"))
+		var cursor *catclient.Cursor
+		if cursorRaw := r.URL.Query().Get("cursor"); cursorRaw != "" {
+			cursor = &cursorRaw
+		}
+		pag, err := q.ListarValoresCatalogo(r.Context(), tipo, cursor)
+		if err != nil {
+			escribirError(w, err)
+			return
+		}
+		escribirJSON(w, http.StatusOK, pag)
+	})
+
+	// POST /api/v1/catalogos-tipo/{tipo} — alta de un valor (versión 1).
+	mux.HandleFunc("POST /api/v1/catalogos-tipo/{tipo}", func(w http.ResponseWriter, r *http.Request) {
+		tipo := catclient.TipoCatalogo(r.PathValue("tipo"))
+		var entrada catclient.ValorCatalogoEntrada
+		if err := json.NewDecoder(r.Body).Decode(&entrada); err != nil {
+			escribirError(w, platformerrors.NewValidacion("cuerpo inválido"))
+			return
+		}
+		v, err := cmd.CrearValorCatalogo(r.Context(), tipo, entrada)
+		if err != nil {
+			escribirError(w, err)
+			return
+		}
+		escribirJSON(w, http.StatusCreated, v)
+	})
+
+	// PATCH /api/v1/catalogos-tipo/{tipo}/{id} — nueva versión (modificar o
+	// desactivar). Desactivar es enviar estado: inactivo por esta misma ruta.
+	mux.HandleFunc("PATCH /api/v1/catalogos-tipo/{tipo}/{id}", func(w http.ResponseWriter, r *http.Request) {
+		tipo := catclient.TipoCatalogo(r.PathValue("tipo"))
+		id, err := uuid.Parse(r.PathValue("id"))
+		if err != nil {
+			escribirError(w, platformerrors.NewValidacion("id de valor de catálogo inválido"))
+			return
+		}
+		var cambios catclient.ValorCatalogoCambios
+		if err := json.NewDecoder(r.Body).Decode(&cambios); err != nil {
+			escribirError(w, platformerrors.NewValidacion("cuerpo inválido"))
+			return
+		}
+		v, err := cmd.ActualizarValorCatalogo(r.Context(), tipo, id, cambios)
+		if err != nil {
+			escribirError(w, err)
+			return
+		}
+		escribirJSON(w, http.StatusOK, v)
+	})
+
+	// --- Contratos y SLA (superficie completa de E5-T4 sobre tracer.8). Mismo
+	// patrón de versionado que vehículos y custodios. INFORMATIVOS en V1 (DEC-022
+	// #4 / DEC-025): la lectura `?a_fecha` sostiene la exportación probatoria (P8);
+	// ningún flujo de E1 los consume para bloquear ni alertar. Los handlers
+	// delegan en los MISMOS casos de uso que Consultas()/Comandos() (I3).
+
+	// POST /api/v1/contratos — alta (crea la versión 1).
+	mux.HandleFunc("POST /api/v1/contratos", func(w http.ResponseWriter, r *http.Request) {
+		var entrada catclient.ContratoEntrada
+		if err := json.NewDecoder(r.Body).Decode(&entrada); err != nil {
+			escribirError(w, platformerrors.NewValidacion("cuerpo inválido"))
+			return
+		}
+		ct, err := cmd.CrearContrato(r.Context(), entrada)
+		if err != nil {
+			escribirError(w, err)
+			return
+		}
+		escribirJSON(w, http.StatusCreated, ct)
+	})
+
+	// GET /api/v1/contratos/{id} — vigente, o ?a_fecha (lectura probatoria P8).
+	mux.HandleFunc("GET /api/v1/contratos/{id}", func(w http.ResponseWriter, r *http.Request) {
+		id, err := uuid.Parse(r.PathValue("id"))
+		if err != nil {
+			escribirError(w, platformerrors.NewValidacion("id de contrato inválido"))
+			return
+		}
+		aFecha, err := parsearAFecha(r.URL.Query().Get("a_fecha"))
+		if err != nil {
+			escribirError(w, err)
+			return
+		}
+		ct, err := q.ObtenerContrato(r.Context(), id, aFecha)
+		if err != nil {
+			escribirError(w, err)
+			return
+		}
+		escribirJSON(w, http.StatusOK, ct)
+	})
+
+	// PATCH /api/v1/contratos/{id} — nueva versión.
+	mux.HandleFunc("PATCH /api/v1/contratos/{id}", func(w http.ResponseWriter, r *http.Request) {
+		id, err := uuid.Parse(r.PathValue("id"))
+		if err != nil {
+			escribirError(w, platformerrors.NewValidacion("id de contrato inválido"))
+			return
+		}
+		var cambios catclient.ContratoCambios
+		if err := json.NewDecoder(r.Body).Decode(&cambios); err != nil {
+			escribirError(w, platformerrors.NewValidacion("cuerpo inválido"))
+			return
+		}
+		ct, err := cmd.ActualizarContrato(r.Context(), id, cambios)
+		if err != nil {
+			escribirError(w, err)
+			return
+		}
+		escribirJSON(w, http.StatusOK, ct)
+	})
+
+	// POST /api/v1/sla — alta (crea la versión 1).
+	mux.HandleFunc("POST /api/v1/sla", func(w http.ResponseWriter, r *http.Request) {
+		var entrada catclient.SlaEntrada
+		if err := json.NewDecoder(r.Body).Decode(&entrada); err != nil {
+			escribirError(w, platformerrors.NewValidacion("cuerpo inválido"))
+			return
+		}
+		s, err := cmd.CrearSla(r.Context(), entrada)
+		if err != nil {
+			escribirError(w, err)
+			return
+		}
+		escribirJSON(w, http.StatusCreated, s)
+	})
+
+	// GET /api/v1/sla/{id} — vigente, o ?a_fecha (criterio de aceptación E5-T4).
+	mux.HandleFunc("GET /api/v1/sla/{id}", func(w http.ResponseWriter, r *http.Request) {
+		id, err := uuid.Parse(r.PathValue("id"))
+		if err != nil {
+			escribirError(w, platformerrors.NewValidacion("id de sla inválido"))
+			return
+		}
+		aFecha, err := parsearAFecha(r.URL.Query().Get("a_fecha"))
+		if err != nil {
+			escribirError(w, err)
+			return
+		}
+		s, err := q.ObtenerSla(r.Context(), id, aFecha)
+		if err != nil {
+			escribirError(w, err)
+			return
+		}
+		escribirJSON(w, http.StatusOK, s)
+	})
+
+	// PATCH /api/v1/sla/{id} — nueva versión.
+	mux.HandleFunc("PATCH /api/v1/sla/{id}", func(w http.ResponseWriter, r *http.Request) {
+		id, err := uuid.Parse(r.PathValue("id"))
+		if err != nil {
+			escribirError(w, platformerrors.NewValidacion("id de sla inválido"))
+			return
+		}
+		var cambios catclient.SlaCambios
+		if err := json.NewDecoder(r.Body).Decode(&cambios); err != nil {
+			escribirError(w, platformerrors.NewValidacion("cuerpo inválido"))
+			return
+		}
+		s, err := cmd.ActualizarSla(r.Context(), id, cambios)
+		if err != nil {
+			escribirError(w, err)
+			return
+		}
+		escribirJSON(w, http.StatusOK, s)
+	})
+}
+
+// parsearIDs convierte la lista separada por coma del query param `ids` a UUIDs.
+func parsearIDs(raw string) ([]catclient.Id, error) {
+	partes := strings.Split(raw, ",")
+	ids := make([]catclient.Id, 0, len(partes))
+	for _, p := range partes {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		id, err := uuid.Parse(p)
+		if err != nil {
+			return nil, platformerrors.NewValidacion("id inválido en lote: %s", p)
+		}
+		ids = append(ids, id)
+	}
+	if len(ids) == 0 {
+		return nil, platformerrors.NewValidacion("ids no puede estar vacío")
+	}
+	return ids, nil
+}
+
+// parsearAFecha interpreta el query param `a_fecha` (RFC 3339). Vacío ⇒ nil.
+func parsearAFecha(raw string) (*catclient.MarcaTiempo, error) {
+	if raw == "" {
+		return nil, nil
+	}
+	t, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		return nil, platformerrors.NewValidacion("a_fecha inválida (se espera RFC 3339)")
+	}
+	return &t, nil
+}
+
+// escribirJSON serializa v como JSON con el status dado.
+func escribirJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+// escribirError traduce un error de la taxonomía de la plataforma a su status
+// HTTP (invariante I3: la misma categoría se traduce igual en HTTP y en proceso).
+// El `codigo` del contrato es un valor de máquina estable; se deriva de la
+// categoría de la plataforma.
+func escribirError(w http.ResponseWriter, err error) {
+	cat := platformerrors.AsCategory(err)
+	escribirJSON(w, cat.HTTPStatus(), catclient.Error{
+		Codigo:  codigoDe(cat),
+		Mensaje: err.Error(),
+	})
+}
+
+// codigoDe mapea la categoría de la plataforma a un código de máquina estable en
+// snake_case (los consumidores ramifican sobre `codigo`, no sobre `mensaje`).
+func codigoDe(c platformerrors.Category) string {
+	switch c {
+	case platformerrors.CategoryNoAutorizado:
+		return "no_autorizado"
+	case platformerrors.CategoryNoEncontrado:
+		return "no_encontrado"
+	case platformerrors.CategoryValidacion:
+		return "validacion"
+	case platformerrors.CategoryConflicto:
+		return "conflicto"
+	case platformerrors.CategoryDegradado:
+		return "degradado"
+	case platformerrors.CategoryRateLimit:
+		return "rate_limit"
+	default:
+		return "roto"
+	}
 }
 
 // Workers devuelve los workers embebidos del módulo (ADR 29 §6). catalogos
@@ -112,25 +639,105 @@ func (m *Module) Consultas() ConsultasAPI {
 // 1:1 a un operationId presente en catalogos.yaml de la versión fijada; no hay
 // métodos sin operación contractual (00 regla 6).
 //
-// Hoy expone solo lo que el contrato ya tiene: lectura de clientes, contrato y
-// SLA, y lectura + aptitud de custodios y vehículos. Las lecturas por lote
-// (C4/C5) y a una fecha de átomos (C9) NO están en el contrato: no se agregan
-// aquí. C3 resuelta en tracer.4: el átomo es `Vehiculo` (ADR 31 §5), no `Unidad`,
-// y la aptitud se evalúa contra el contrato/SLA de un cliente (de ahí `clienteID`).
+// Expone lo que el contrato tracer.8 ya tiene para catalogos: la superficie de
+// vehículos (E5-T1) y custodios (E5-T2) —listado paginado y por lote, lectura
+// vigente o a una fecha, y aptitud—, la lectura por lote de los catálogos de
+// tipo (E5-T3), y la lectura de contrato/SLA vigente o a una fecha (E5-T4). La
+// lectura del expediente de cliente sigue declarada pero en scaffold. El átomo
+// es `Vehiculo` (ADR 31 §5), no `Unidad`, y la aptitud se
+// evalúa contra el contrato/SLA de un cliente (de ahí `clienteID`). La aptitud
+// es INFORMATIVA (DEC-055): nunca gatea.
 type ConsultasAPI interface {
 	ObtenerCliente(ctx context.Context, id catclient.Id) (*catclient.Cliente, error)
+	// ListarClientes devuelve una página de clientes ACTIVOS vigentes, paginada
+	// por cursor (selector de cliente al crear un viaje por Operación, E8-T11).
+	// Solo activos (DEC-101 #1); el filtro de alcance del jefe_operativo NO lo
+	// aplica catalogos (DEC-101 #2, lo aplican bff/operacion).
+	ListarClientes(ctx context.Context, cursor *catclient.Cursor) (*catclient.PaginaClientes, error)
 	ObtenerContrato(ctx context.Context, id catclient.Id, aFecha *catclient.MarcaTiempo) (*catclient.Contrato, error)
 	ObtenerSla(ctx context.Context, id catclient.Id, aFecha *catclient.MarcaTiempo) (*catclient.Sla, error)
+	// ListarVehiculos devuelve una página de vehículos vigentes (paginación por
+	// cursor; cursor nil arranca desde el principio).
+	ListarVehiculos(ctx context.Context, cursor *catclient.Cursor) (*catclient.PaginaVehiculos, error)
+	// ListarVehiculosPorLote devuelve los vehículos vigentes de ids, en un solo
+	// viaje (C4): evita el patrón N+1 de los consumidores.
+	ListarVehiculosPorLote(ctx context.Context, ids []catclient.Id) (*catclient.PaginaVehiculos, error)
+	// ObtenerVehiculo devuelve el vehículo vigente, o el vigente a una fecha
+	// cuando aFecha no es nil (C9, lectura probatoria P8).
+	ObtenerVehiculo(ctx context.Context, id catclient.Id, aFecha *catclient.MarcaTiempo) (*catclient.Vehiculo, error)
 	// AptitudVehiculo y AptitudCustodio devuelven aptitud INFORMATIVA (DEC-055):
-	// nunca gatean, y "desconocida" es un valor válido si el dato falta. clienteID
-	// acota la evaluación al contrato/SLA de ese cliente (tracer.4).
+	// nunca gatean, y "desconocida" es un valor válido si el dato falta. En
+	// vehiculo, clienteID acota la evaluación al contrato/SLA de ese cliente; en
+	// custodio se acepta por conformidad de contrato pero no acota (el custodio
+	// no pertenece a un cliente — ver custodios.Aptitud).
 	AptitudVehiculo(ctx context.Context, vehiculoID, clienteID catclient.Id) (*catclient.Aptitud, error)
 	AptitudCustodio(ctx context.Context, custodioID, clienteID catclient.Id) (*catclient.Aptitud, error)
+	// ListarCustodios devuelve una página de custodios vigentes (paginación por
+	// cursor; cursor nil arranca desde el principio).
+	ListarCustodios(ctx context.Context, cursor *catclient.Cursor) (*catclient.PaginaCustodios, error)
+	// ListarCustodiosPorLote devuelve los custodios vigentes de ids, en un solo
+	// viaje (C4): evita el patrón N+1 de los consumidores.
+	ListarCustodiosPorLote(ctx context.Context, ids []catclient.Id) (*catclient.PaginaCustodios, error)
+	// ObtenerCustodio devuelve el custodio vigente, o el vigente a una fecha
+	// cuando aFecha no es nil (C9, lectura probatoria P8).
+	ObtenerCustodio(ctx context.Context, id catclient.Id, aFecha *catclient.MarcaTiempo) (*catclient.Custodio, error)
+	// ListarValoresCatalogo devuelve una página de valores vigentes de uno de los
+	// cinco catálogos de tipo de V1 (E5-T3), paginada por cursor; cursor nil
+	// arranca desde el principio. Un `tipo` fuera del enum es error de validación.
+	ListarValoresCatalogo(ctx context.Context, tipo catclient.TipoCatalogo, cursor *catclient.Cursor) (*catclient.PaginaValoresCatalogo, error)
+}
+
+// ComandosAPI es la superficie de ESCRITURA administrativa de catalogos (E5,
+// brecha C7). Separada de ConsultasAPI (solo lectura) porque mutar un vehículo
+// crea una nueva versión y emite `catalogo.actualizado` en la misma transacción
+// (P17), una responsabilidad distinta de leer.
+type ComandosAPI interface {
+	// CrearVehiculo da de alta un vehículo (versión 1). clienteID se toma del
+	// cuerpo del contrato (VehiculoEntrada.ClienteId).
+	CrearVehiculo(ctx context.Context, e catclient.VehiculoEntrada) (*catclient.Vehiculo, error)
+	// ActualizarVehiculo crea una nueva versión con los campos presentes, sin
+	// sobrescribir la anterior (P8).
+	ActualizarVehiculo(ctx context.Context, id catclient.Id, c catclient.VehiculoCambios) (*catclient.Vehiculo, error)
+	// CrearCustodio da de alta un custodio (versión 1). A diferencia de vehículo,
+	// no toma cliente_id: el custodio no pertenece a un cliente.
+	CrearCustodio(ctx context.Context, e catclient.CustodioEntrada) (*catclient.Custodio, error)
+	// ActualizarCustodio crea una nueva versión con los campos presentes, sin
+	// sobrescribir la anterior (P8).
+	ActualizarCustodio(ctx context.Context, id catclient.Id, c catclient.CustodioCambios) (*catclient.Custodio, error)
+	// CrearValorCatalogo da de alta un valor en el catálogo `tipo` (versión 1).
+	// El `tipo` viaja en la ruta, no en el cuerpo (contrato tracer.8).
+	CrearValorCatalogo(ctx context.Context, tipo catclient.TipoCatalogo, e catclient.ValorCatalogoEntrada) (*catclient.ValorCatalogo, error)
+	// ActualizarValorCatalogo crea una nueva versión con los campos presentes, sin
+	// sobrescribir la anterior (P8). Desactivar un valor es enviar estado
+	// `inactivo` por esta vía: no rompe los registros históricos (E5-HU-023).
+	ActualizarValorCatalogo(ctx context.Context, tipo catclient.TipoCatalogo, id catclient.Id, c catclient.ValorCatalogoCambios) (*catclient.ValorCatalogo, error)
+	// CrearContrato da de alta un contrato (versión 1) para un cliente. clienteID
+	// se toma del cuerpo (ContratoEntrada.ClienteId). INFORMATIVO en V1 (DEC-022
+	// #4): no condiciona ningún flujo de E1.
+	CrearContrato(ctx context.Context, e catclient.ContratoEntrada) (*catclient.Contrato, error)
+	// ActualizarContrato crea una nueva versión con los campos presentes, sin
+	// sobrescribir la anterior (P8): la versión previa sigue consultable con
+	// `?a_fecha`.
+	ActualizarContrato(ctx context.Context, id catclient.Id, c catclient.ContratoCambios) (*catclient.Contrato, error)
+	// CrearSla da de alta un SLA (versión 1) de un contrato. contratoID se toma
+	// del cuerpo (SlaEntrada.ContratoId). INFORMATIVO en V1 (DEC-022 #4 / DEC-025):
+	// se registra, no se vigila ni alerta.
+	CrearSla(ctx context.Context, e catclient.SlaEntrada) (*catclient.Sla, error)
+	// ActualizarSla crea una nueva versión con los campos presentes, sin
+	// sobrescribir la anterior (P8): la versión previa sigue consultable con
+	// `?a_fecha`.
+	ActualizarSla(ctx context.Context, id catclient.Id, c catclient.SlaCambios) (*catclient.Sla, error)
+}
+
+// Comandos expone la superficie de escritura administrativa.
+func (m *Module) Comandos() ComandosAPI {
+	return &comandos{m: m}
 }
 
 // consultas implementa ConsultasAPI delegando en los casos de uso del módulo.
-// Scaffolding: todos los métodos devuelven "no implementado" todavía; la
-// implementación real llega con cada sub-módulo.
+// vehículos, custodios, catálogos de tipo y el listado de clientes ya están
+// implementados; obtener-cliente, contrato y SLA siguen según su estado (obtener
+// cliente en scaffold).
 type consultas struct {
 	m *Module
 }
@@ -139,18 +746,230 @@ func (c *consultas) ObtenerCliente(ctx context.Context, id catclient.Id) (*catcl
 	return nil, errNoImplementado("ObtenerCliente")
 }
 
+func (c *consultas) ListarClientes(ctx context.Context, cursor *catclient.Cursor) (*catclient.PaginaClientes, error) {
+	pag, err := c.m.clientes.Listar(ctx, cursor)
+	if err != nil {
+		return nil, err
+	}
+	return &pag, nil
+}
+
 func (c *consultas) ObtenerContrato(ctx context.Context, id catclient.Id, aFecha *catclient.MarcaTiempo) (*catclient.Contrato, error) {
-	return nil, errNoImplementado("ObtenerContrato")
+	ct, err := c.m.contratos.Obtener(ctx, id, aFecha)
+	if errors.Is(err, clientes.ErrContratoNoEncontrado) {
+		return nil, platformerrors.NewNoEncontrado("contrato no encontrado")
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &ct, nil
 }
 
 func (c *consultas) ObtenerSla(ctx context.Context, id catclient.Id, aFecha *catclient.MarcaTiempo) (*catclient.Sla, error) {
-	return nil, errNoImplementado("ObtenerSla")
+	s, err := c.m.sla.Obtener(ctx, id, aFecha)
+	if errors.Is(err, sla.ErrNoEncontrado) {
+		return nil, platformerrors.NewNoEncontrado("sla no encontrado")
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &s, nil
+}
+
+func (c *consultas) ListarVehiculos(ctx context.Context, cursor *catclient.Cursor) (*catclient.PaginaVehiculos, error) {
+	pag, err := c.m.vehiculos.Listar(ctx, cursor)
+	if err != nil {
+		return nil, err
+	}
+	return &pag, nil
+}
+
+func (c *consultas) ListarVehiculosPorLote(ctx context.Context, ids []catclient.Id) (*catclient.PaginaVehiculos, error) {
+	pag, err := c.m.vehiculos.ListarPorLote(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+	return &pag, nil
+}
+
+func (c *consultas) ObtenerVehiculo(ctx context.Context, id catclient.Id, aFecha *catclient.MarcaTiempo) (*catclient.Vehiculo, error) {
+	v, err := c.m.vehiculos.Obtener(ctx, id, aFecha)
+	if errors.Is(err, vehiculos.ErrNoEncontrado) {
+		return nil, platformerrors.NewNoEncontrado("vehículo no encontrado")
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &v, nil
 }
 
 func (c *consultas) AptitudVehiculo(ctx context.Context, vehiculoID, clienteID catclient.Id) (*catclient.Aptitud, error) {
-	return nil, errNoImplementado("AptitudVehiculo")
+	ap, err := c.m.vehiculos.Aptitud(ctx, vehiculoID, clienteID, time.Now())
+	if errors.Is(err, vehiculos.ErrNoEncontrado) {
+		// Traducción a la taxonomía de la plataforma (I3): no encontrado ⇒ 404.
+		return nil, platformerrors.NewNoEncontrado("vehículo no encontrado")
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &ap, nil
 }
 
+func (c *consultas) ListarCustodios(ctx context.Context, cursor *catclient.Cursor) (*catclient.PaginaCustodios, error) {
+	pag, err := c.m.custodios.Listar(ctx, cursor)
+	if err != nil {
+		return nil, err
+	}
+	return &pag, nil
+}
+
+func (c *consultas) ListarCustodiosPorLote(ctx context.Context, ids []catclient.Id) (*catclient.PaginaCustodios, error) {
+	pag, err := c.m.custodios.ListarPorLote(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+	return &pag, nil
+}
+
+func (c *consultas) ObtenerCustodio(ctx context.Context, id catclient.Id, aFecha *catclient.MarcaTiempo) (*catclient.Custodio, error) {
+	cst, err := c.m.custodios.Obtener(ctx, id, aFecha)
+	if errors.Is(err, custodios.ErrNoEncontrado) {
+		return nil, platformerrors.NewNoEncontrado("custodio no encontrado")
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &cst, nil
+}
+
+// AptitudCustodio devuelve aptitud INFORMATIVA del custodio (DEC-055). clienteID
+// se recibe por conformidad con el contrato pero NO acota la evaluación.
 func (c *consultas) AptitudCustodio(ctx context.Context, custodioID, clienteID catclient.Id) (*catclient.Aptitud, error) {
-	return nil, errNoImplementado("AptitudCustodio")
+	_ = clienteID // aceptado pero no usado en V1 (pendiente de decisión de modelado)
+	ap, err := c.m.custodios.Aptitud(ctx, custodioID)
+	if errors.Is(err, custodios.ErrNoEncontrado) {
+		return nil, platformerrors.NewNoEncontrado("custodio no encontrado")
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &ap, nil
+}
+
+func (c *consultas) ListarValoresCatalogo(ctx context.Context, tipo catclient.TipoCatalogo, cursor *catclient.Cursor) (*catclient.PaginaValoresCatalogo, error) {
+	pag, err := c.m.tipos.Listar(ctx, tipo, cursor)
+	if errors.Is(err, tipos.ErrTipoInvalido) {
+		return nil, platformerrors.NewValidacion("tipo de catálogo inválido")
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &pag, nil
+}
+
+// comandos implementa ComandosAPI delegando en el repositorio de cada
+// sub-módulo. La escritura de vehículos ya está implementada (C7).
+type comandos struct {
+	m *Module
+}
+
+func (c *comandos) CrearVehiculo(ctx context.Context, e catclient.VehiculoEntrada) (*catclient.Vehiculo, error) {
+	v, err := c.m.vehiculos.Crear(ctx, e, e.ClienteId)
+	if err != nil {
+		return nil, err
+	}
+	return &v, nil
+}
+
+func (c *comandos) ActualizarVehiculo(ctx context.Context, id catclient.Id, cambios catclient.VehiculoCambios) (*catclient.Vehiculo, error) {
+	v, err := c.m.vehiculos.Actualizar(ctx, id, cambios, time.Now())
+	if errors.Is(err, vehiculos.ErrNoEncontrado) {
+		return nil, platformerrors.NewNoEncontrado("vehículo no encontrado")
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &v, nil
+}
+
+func (c *comandos) CrearCustodio(ctx context.Context, e catclient.CustodioEntrada) (*catclient.Custodio, error) {
+	cst, err := c.m.custodios.Crear(ctx, e)
+	if err != nil {
+		return nil, err
+	}
+	return &cst, nil
+}
+
+func (c *comandos) ActualizarCustodio(ctx context.Context, id catclient.Id, cambios catclient.CustodioCambios) (*catclient.Custodio, error) {
+	cst, err := c.m.custodios.Actualizar(ctx, id, cambios, time.Now())
+	if errors.Is(err, custodios.ErrNoEncontrado) {
+		return nil, platformerrors.NewNoEncontrado("custodio no encontrado")
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &cst, nil
+}
+
+func (c *comandos) CrearValorCatalogo(ctx context.Context, tipo catclient.TipoCatalogo, e catclient.ValorCatalogoEntrada) (*catclient.ValorCatalogo, error) {
+	v, err := c.m.tipos.Crear(ctx, tipo, e)
+	if errors.Is(err, tipos.ErrTipoInvalido) {
+		return nil, platformerrors.NewValidacion("tipo de catálogo inválido")
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &v, nil
+}
+
+func (c *comandos) ActualizarValorCatalogo(ctx context.Context, tipo catclient.TipoCatalogo, id catclient.Id, cambios catclient.ValorCatalogoCambios) (*catclient.ValorCatalogo, error) {
+	v, err := c.m.tipos.Actualizar(ctx, tipo, id, cambios, time.Now())
+	if errors.Is(err, tipos.ErrTipoInvalido) {
+		return nil, platformerrors.NewValidacion("tipo de catálogo inválido")
+	}
+	if errors.Is(err, tipos.ErrNoEncontrado) {
+		return nil, platformerrors.NewNoEncontrado("valor de catálogo no encontrado")
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &v, nil
+}
+
+func (c *comandos) CrearContrato(ctx context.Context, e catclient.ContratoEntrada) (*catclient.Contrato, error) {
+	ct, err := c.m.contratos.Crear(ctx, e)
+	if err != nil {
+		return nil, err
+	}
+	return &ct, nil
+}
+
+func (c *comandos) ActualizarContrato(ctx context.Context, id catclient.Id, cambios catclient.ContratoCambios) (*catclient.Contrato, error) {
+	ct, err := c.m.contratos.Actualizar(ctx, id, cambios, time.Now())
+	if errors.Is(err, clientes.ErrContratoNoEncontrado) {
+		return nil, platformerrors.NewNoEncontrado("contrato no encontrado")
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &ct, nil
+}
+
+func (c *comandos) CrearSla(ctx context.Context, e catclient.SlaEntrada) (*catclient.Sla, error) {
+	s, err := c.m.sla.Crear(ctx, e)
+	if err != nil {
+		return nil, err
+	}
+	return &s, nil
+}
+
+func (c *comandos) ActualizarSla(ctx context.Context, id catclient.Id, cambios catclient.SlaCambios) (*catclient.Sla, error) {
+	s, err := c.m.sla.Actualizar(ctx, id, cambios, time.Now())
+	if errors.Is(err, sla.ErrNoEncontrado) {
+		return nil, platformerrors.NewNoEncontrado("sla no encontrado")
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &s, nil
 }
