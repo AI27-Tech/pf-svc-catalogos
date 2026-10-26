@@ -84,6 +84,7 @@ type Module struct {
 	custodios *custodios.Repositorio
 	tipos     *tipos.Repositorio
 	contratos *clientes.RepositorioContrato
+	clientes  *clientes.RepositorioCliente
 	sla       *sla.Repositorio
 }
 
@@ -97,6 +98,7 @@ func New(p Pools, d Deps) (*Module, error) {
 		custodios: custodios.NewRepositorio(p.Catalogos),
 		tipos:     tipos.NewRepositorio(p.Catalogos),
 		contratos: clientes.NewRepositorioContrato(p.Catalogos),
+		clientes:  clientes.NewRepositorioCliente(p.Catalogos),
 		sla:       sla.NewRepositorio(p.Catalogos),
 	}, nil
 }
@@ -105,8 +107,8 @@ func New(p Pools, d Deps) (*Module, error) {
 // monta las operaciones presentes en la versión fijada de catalogos.yaml
 // (contrato primero, 00 regla 6). Hoy monta vehículos (E5-T1), custodios
 // (E5-T2), catálogos de tipo (E5-T3) y contratos/SLA (E5-T4), todas cerradas en
-// tracer.8. La lectura de expediente de cliente sigue en scaffold (brecha C5),
-// así que no se monta.
+// tracer.8. El listado de clientes (selector, E8-T11) también se monta; el
+// obtener-expediente de cliente sigue en scaffold (brecha C5).
 func (m *Module) Routes(mux *http.ServeMux) {
 	// Vehículos (superficie completa de E5-T1 sobre tracer.6). Los handlers
 	// delegan en los MISMOS casos de uso que Consultas()/Comandos() (I3): el
@@ -227,6 +229,24 @@ func (m *Module) Routes(mux *http.ServeMux) {
 			return
 		}
 		escribirJSON(w, http.StatusOK, ap)
+	})
+
+	// --- Clientes (selector de cliente para crear un viaje por Operación, E8-T11).
+	// Solo lectura: GET /api/v1/clientes, paginado por cursor, solo clientes
+	// activos (DEC-101 #1). NO se proyecta ?ids (es la lectura por lote, no un
+	// selector); el alcance del jefe_operativo lo aplican bff/operacion
+	// (DEC-101 #2), no catalogos.
+	mux.HandleFunc("GET /api/v1/clientes", func(w http.ResponseWriter, r *http.Request) {
+		var cursor *catclient.Cursor
+		if cursorRaw := r.URL.Query().Get("cursor"); cursorRaw != "" {
+			cursor = &cursorRaw
+		}
+		pag, err := q.ListarClientes(r.Context(), cursor)
+		if err != nil {
+			escribirError(w, err)
+			return
+		}
+		escribirJSON(w, http.StatusOK, pag)
 	})
 
 	// --- Custodios (superficie completa de E5-T2). Mismo patrón que vehículos:
@@ -629,6 +649,11 @@ func (m *Module) Consultas() ConsultasAPI {
 // es INFORMATIVA (DEC-055): nunca gatea.
 type ConsultasAPI interface {
 	ObtenerCliente(ctx context.Context, id catclient.Id) (*catclient.Cliente, error)
+	// ListarClientes devuelve una página de clientes ACTIVOS vigentes, paginada
+	// por cursor (selector de cliente al crear un viaje por Operación, E8-T11).
+	// Solo activos (DEC-101 #1); el filtro de alcance del jefe_operativo NO lo
+	// aplica catalogos (DEC-101 #2, lo aplican bff/operacion).
+	ListarClientes(ctx context.Context, cursor *catclient.Cursor) (*catclient.PaginaClientes, error)
 	ObtenerContrato(ctx context.Context, id catclient.Id, aFecha *catclient.MarcaTiempo) (*catclient.Contrato, error)
 	ObtenerSla(ctx context.Context, id catclient.Id, aFecha *catclient.MarcaTiempo) (*catclient.Sla, error)
 	// ListarVehiculos devuelve una página de vehículos vigentes (paginación por
@@ -710,14 +735,23 @@ func (m *Module) Comandos() ComandosAPI {
 }
 
 // consultas implementa ConsultasAPI delegando en los casos de uso del módulo.
-// vehículos, custodios y catálogos de tipo ya están implementados; cliente,
-// contrato y SLA siguen devolviendo "no implementado" (scaffold).
+// vehículos, custodios, catálogos de tipo y el listado de clientes ya están
+// implementados; obtener-cliente, contrato y SLA siguen según su estado (obtener
+// cliente en scaffold).
 type consultas struct {
 	m *Module
 }
 
 func (c *consultas) ObtenerCliente(ctx context.Context, id catclient.Id) (*catclient.Cliente, error) {
 	return nil, errNoImplementado("ObtenerCliente")
+}
+
+func (c *consultas) ListarClientes(ctx context.Context, cursor *catclient.Cursor) (*catclient.PaginaClientes, error) {
+	pag, err := c.m.clientes.Listar(ctx, cursor)
+	if err != nil {
+		return nil, err
+	}
+	return &pag, nil
 }
 
 func (c *consultas) ObtenerContrato(ctx context.Context, id catclient.Id, aFecha *catclient.MarcaTiempo) (*catclient.Contrato, error) {

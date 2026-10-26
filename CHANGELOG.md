@@ -1,5 +1,24 @@
 # CHANGELOG
 
+## 2026-10-27 (E8-T11 — listado de clientes para el selector de creación de viaje)
+
+**Resumen:** Se implementa `listarClientes` → `GET /api/v1/clientes` (sub-módulo `cliente` en `internal/clientes`, `RepositorioCliente`), hasta ahora en scaffold (`ObtenerCliente` seguía `errNoImplementado`). Es el selector de cliente para crear un viaje por Operación (E8-T11, DEC-026 #3). Solo lectura, paginado por cursor sobre la versión vigente, igual patrón que vehículos/custodios. El contrato (`listarClientes`/`PaginaClientes`/`Cliente`) ya existía desde tracer.8; esta ola le da cuerpo en el servicio. Sin cambio de contrato ni de pin.
+
+**Para quién:** para el `bff`, que proyecta esta operación como su `GET /api/v1/clientes` (E8-T11), y de ahí al panel interno de Operación. `pf-svc-core` cablea el adaptador en proceso `bff→catalogos`.
+
+**Reglas aplicadas (DEC-101, confirmadas con el Lead):**
+- **Solo clientes `activo` (DEC-101 #1):** el `WHERE` filtra `estado = 'activo'`; un cliente inactivo no es asignable a un viaje nuevo. El filtro vive en `catalogos` porque es el único punto implementable hoy (el `bff` reenvía la página tal cual, no inspecciona `estado`). Afina el *dónde* de DEC-101 #1 (la decisión lo atribuía al `bff`/`operacion`), sin tocar el alcance.
+- **Alcance del `jefe_operativo` NO lo aplica `catalogos` (DEC-101 #2):** `catalogos` es hoja del grafo, sin rol en el token ni vínculo cliente↔usuario; no tiene de dónde derivar el alcance. DEC-101 #2 lo atribuye al `bff`/`operacion`. Es un hueco conocido, no un atajo: la lista que devuelve `catalogos` no está acotada por alcance.
+- **`contrato_vigente_id` → `null`:** el schema `Cliente` lo declara (nullable), pero `catalogos.cliente` no tiene esa columna (la relación vive al revés, en `catalogos.contrato.cliente_id`). Para un selector ligero se devuelve `null`, que el contrato permite; resolverlo exigiría un JOIN que nadie pidió.
+- **No se proyecta `?ids`:** es la lectura por lote, no un selector (DEC-101 #1). El handler solo lee `?cursor`.
+
+**Cambios:**
+- `internal/clientes/cliente.go` (nuevo): `RepositorioCliente.Listar(ctx, cursor)` — SELECT `id, nombre, estado` de `catalogos.cliente` con `vigente_hasta IS NULL AND estado = 'activo'`, keyset por `id`, página 50. `escanearClientes` deja `contrato_vigente_id` en nil.
+- `catalogos.go`: campo `clientes` en `Module`, construido en `New`; `ListarClientes` en `ConsultasAPI` + impl; ruta `GET /api/v1/clientes` en `Routes` (solo `?cursor`). Comentarios de `Routes`/`consultas` actualizados (ya no es scaffold el listado).
+- `internal/clientes/cliente_integracion_test.go` (nuevo): solo-activos, paginación por cursor (51→50+1 sin repetir ni perder), página vacía. Verde contra Postgres real.
+
+**Verificación:** `go build/vet ./...`, `go test -p 1 ./...` (los de integración en serie, porque comparten el esquema `catalogos`), `arch-test` (hoja, OK) y `go build ./cmd/api` (I5). `GRANT SELECT` sobre `catalogos.cliente` ya existía (0002): la lectura no toca migraciones ni grants.
+
 ## 2026:10:15 (E5-T4 — contratos y SLA versionados por vigencia sobre tracer.8)
 
 **Resumen:** Se implementan los sub-módulos `contrato` (en `internal/clientes`) y `sla` (E5-T4 / AI27-76) sobre el contrato `v0.1.0-tracer.8`, que agregó su superficie HTTP. Ambos se versionan por vigencia (no se sobrescriben, P8) y publican `catalogo.actualizado` en la misma transacción (P17), mismo patrón que vehículos (E5-T1) y custodios (E5-T2). Son **INFORMATIVOS en V1** (DEC-022 #4, confirmado por Max en DEC-025): se registran para lectura administrativa y exportación probatoria, pero ningún flujo de E1 los consume para bloquear ni alertar. La lectura `?a_fecha` sostiene la exportación de un viaje cerrado: devuelve la versión que regía en esa fecha, no la actual.
