@@ -1,5 +1,134 @@
 # CHANGELOG
 
+## 2026-10-27 (E8-T11 — listado de clientes para el selector de creación de viaje)
+
+**Resumen:** Se implementa `listarClientes` → `GET /api/v1/clientes` (sub-módulo `cliente` en `internal/clientes`, `RepositorioCliente`), hasta ahora en scaffold (`ObtenerCliente` seguía `errNoImplementado`). Es el selector de cliente para crear un viaje por Operación (E8-T11, DEC-026 #3). Solo lectura, paginado por cursor sobre la versión vigente, igual patrón que vehículos/custodios. El contrato (`listarClientes`/`PaginaClientes`/`Cliente`) ya existía desde tracer.8; esta ola le da cuerpo en el servicio. Sin cambio de contrato ni de pin.
+
+**Para quién:** para el `bff`, que proyecta esta operación como su `GET /api/v1/clientes` (E8-T11), y de ahí al panel interno de Operación. `pf-svc-core` cablea el adaptador en proceso `bff→catalogos`.
+
+**Reglas aplicadas (DEC-101, confirmadas con el Lead):**
+- **Solo clientes `activo` (DEC-101 #1):** el `WHERE` filtra `estado = 'activo'`; un cliente inactivo no es asignable a un viaje nuevo. El filtro vive en `catalogos` porque es el único punto implementable hoy (el `bff` reenvía la página tal cual, no inspecciona `estado`). Afina el *dónde* de DEC-101 #1 (la decisión lo atribuía al `bff`/`operacion`), sin tocar el alcance.
+- **Alcance del `jefe_operativo` NO lo aplica `catalogos` (DEC-101 #2):** `catalogos` es hoja del grafo, sin rol en el token ni vínculo cliente↔usuario; no tiene de dónde derivar el alcance. DEC-101 #2 lo atribuye al `bff`/`operacion`. Es un hueco conocido, no un atajo: la lista que devuelve `catalogos` no está acotada por alcance.
+- **`contrato_vigente_id` → `null`:** el schema `Cliente` lo declara (nullable), pero `catalogos.cliente` no tiene esa columna (la relación vive al revés, en `catalogos.contrato.cliente_id`). Para un selector ligero se devuelve `null`, que el contrato permite; resolverlo exigiría un JOIN que nadie pidió.
+- **No se proyecta `?ids`:** es la lectura por lote, no un selector (DEC-101 #1). El handler solo lee `?cursor`.
+
+**Cambios:**
+- `internal/clientes/cliente.go` (nuevo): `RepositorioCliente.Listar(ctx, cursor)` — SELECT `id, nombre, estado` de `catalogos.cliente` con `vigente_hasta IS NULL AND estado = 'activo'`, keyset por `id`, página 50. `escanearClientes` deja `contrato_vigente_id` en nil.
+- `catalogos.go`: campo `clientes` en `Module`, construido en `New`; `ListarClientes` en `ConsultasAPI` + impl; ruta `GET /api/v1/clientes` en `Routes` (solo `?cursor`). Comentarios de `Routes`/`consultas` actualizados (ya no es scaffold el listado).
+- `internal/clientes/cliente_integracion_test.go` (nuevo): solo-activos, paginación por cursor (51→50+1 sin repetir ni perder), página vacía. Verde contra Postgres real.
+
+**Verificación:** `go build/vet ./...`, `go test -p 1 ./...` (los de integración en serie, porque comparten el esquema `catalogos`), `arch-test` (hoja, OK) y `go build ./cmd/api` (I5). `GRANT SELECT` sobre `catalogos.cliente` ya existía (0002): la lectura no toca migraciones ni grants.
+
+## 2026:10:15 (E5-T4 — contratos y SLA versionados por vigencia sobre tracer.8)
+
+**Resumen:** Se implementan los sub-módulos `contrato` (en `internal/clientes`) y `sla` (E5-T4 / AI27-76) sobre el contrato `v0.1.0-tracer.8`, que agregó su superficie HTTP. Ambos se versionan por vigencia (no se sobrescriben, P8) y publican `catalogo.actualizado` en la misma transacción (P17), mismo patrón que vehículos (E5-T1) y custodios (E5-T2). Son **INFORMATIVOS en V1** (DEC-022 #4, confirmado por Max en DEC-025): se registran para lectura administrativa y exportación probatoria, pero ningún flujo de E1 los consume para bloquear ni alertar. La lectura `?a_fecha` sostiene la exportación de un viaje cerrado: devuelve la versión que regía en esa fecha, no la actual.
+
+**Desajustes de contrato/BD resueltos (confirmados con PM):**
+- **`descripcion`:** los schemas `Contrato` y `Sla` del contrato declaran `descripcion`, pero las tablas de `0001_init.sql` no la tenían. Se agrega como columna opcional (0008).
+- **`contrato.estado`:** `0001` creó `estado NOT NULL`, pero el schema `Contrato` no lo expone en V1. Se relaja a NULL (0008) y queda como columna reservada no gobernada por la API; el alta no la escribe.
+- **Nota de contrato (no es un error):** el schema de respuesta `Contrato` NO lleva `descripcion` (solo `ContratoEntrada`/`ContratoCambios` la llevan, es de entrada). El schema `Sla` sí la expone en la respuesta pero NO lleva vigencia. La capa de BD persiste todo lo necesario; `escanearContratos`/`escanearSlas` leen las columnas internas (descripcion/vigencia) y solo exponen lo que su schema declara.
+
+**Cambios:**
+- `migrations/catalogos/0008_contrato_sla_cols.sql` (nuevo): `ADD COLUMN descripcion` a `contrato` y `sla`; `ALTER COLUMN estado DROP NOT NULL` en `contrato`. Las tablas y sus índices únicos parciales de versión vigente (`un_contrato_vigente_por_cliente`, `un_sla_vigente_por_contrato`) ya existían desde `0001`.
+- `internal/clientes/contrato.go` (nuevo): `RepositorioContrato` con `Obtener` (vigente o `?a_fecha`), `Crear` (versión 1 + outbox) y `Actualizar` (cierra vigencia + inserta versión+1 + outbox), con `pgx.BeginFunc` y P17/P8. `escanearContratos` mapea `version` y vigencia; `descripcion` se lee para arrastrarla en el PATCH pero no viaja en la respuesta (el schema no la declara).
+- `internal/clientes/doc.go`: contrato pasa de scaffold a implementado.
+- `internal/sla/sla.go` (nuevo): `Repositorio` con la misma forma, referenciando `contrato_id`. `escanearSlas` expone `descripcion` (sí está en el schema) y descarta la vigencia (no está en el schema).
+- `internal/sla/doc.go`: SLA pasa de scaffold a implementado.
+- `catalogos.go`: `ConsultasAPI.ObtenerContrato`/`ObtenerSla` dejan de devolver `errNoImplementado` y delegan en los repos (no encontrado ⇒ 404, I3); `ComandosAPI` gana `CrearContrato`/`ActualizarContrato`/`CrearSla`/`ActualizarSla`; `Routes()` monta `POST /api/v1/contratos`, `GET`/`PATCH /api/v1/contratos/{id}`, `POST /api/v1/sla`, `GET`/`PATCH /api/v1/sla/{id}` (lecturas con `?a_fecha`). Cableado de los repos en `New`/`Module`. Comentarios de `Routes` y `ConsultasAPI` actualizados.
+- `internal/clientes/contrato_integracion_test.go` (nuevo): alta que emite evento (P17), actualización que crea versión 2 sin sobrescribir y deja la 1 consultable `?a_fecha` (P8), y no-encontrado.
+- `internal/sla/sla_integracion_test.go` (nuevo): el criterio de aceptación central — `?a_fecha` dentro de la vigencia de la v1 devuelve el compromiso v1, no el actual (prueba el valor de `descripcion` entre versiones) — más outbox (P17) y no-encontrado.
+- `migrations/grants_integration_test.go`: aserciones de `contrato` y `sla` (INSERT y cerrar vigencia permitidos; el DELETE ya estaba denegado, P8).
+- No se agregó migración de grants: `0002` ya otorga `SELECT, INSERT` (de tabla, cubre la columna nueva) y `UPDATE (vigente_hasta)` sobre `contrato` y `sla`.
+
+**Verificado:** `go build ./...` y `go vet ./...` limpios. Suite completa ejecutada **contra Postgres 18 real** (contenedor efímero, `CATALOGOS_TEST_DB` apuntando a él) con `go test ./... -p 1`: en verde, incluyendo `internal/clientes`, `internal/sla` (con `TestSlaVigenteAUnaFecha`) y `TestGrants`.
+
+**Criterios de aceptación (DoD):**
+- "Lectura vigente a una fecha": cubierto por `TestSlaVigenteAUnaFecha` y `TestContratoActualizar_CreaNuevaVersionSinSobrescribir`.
+- "Cambiar el SLA no afecta el flujo de E1": `catalogos` es HOJA del grafo y NO contiene flujo de viaje; el flujo de E1 vive en `operacion`. La evidencia verificable del lado del código es que `operacion` **no referencia** `sla` ni `contrato` en ninguna parte (verificado por búsqueda: cero coincidencias de `sla`/`contrato` en `pf-svc-operacion/**/*.go`). Una prueba que ejecute el flujo completo "sin SLA vigente" debe vivir en `pf-svc-operacion`, no aquí; se señala como pendiente de ese repo (no es implementable honestamente dentro de `catalogos`).
+
+**Pendiente:** C5 (lectura por lote / expediente de cliente) sigue abierta. La prueba de flujo E1 sin SLA pertenece a `pf-svc-operacion`.
+
+**Archivos modificados:**
+- `catalogos.go`
+- `internal/clientes/contrato.go`
+- `internal/clientes/doc.go`
+- `internal/clientes/contrato_integracion_test.go`
+- `internal/sla/sla.go`
+- `internal/sla/doc.go`
+- `internal/sla/sla_integracion_test.go`
+- `migrations/catalogos/0008_contrato_sla_cols.sql`
+- `migrations/grants_integration_test.go`
+
+## 2026:10:15 (E5-T3 — catálogos de tipo sobre tracer.8)
+
+**Resumen:** Se implementa el sub-módulo `tipos` (E5-T3 / AI27-75) sobre el contrato `v0.1.0-tracer.8`, que cerró la brecha C8 (recurso `/api/v1/catalogos-tipo/{tipo}`). Las cinco listas de valores de V1 (tipos de servicio, líneas de transporte, tipos de unidad —incluye `Patrulla`, ADR 31/DEC-044—, tipos de custodia y zonas de riesgo como lista sin geometría, DEC-017) viven en UNA sola tabla `valor_catalogo` parametrizada por `tipo` (opción A del contrato). Lectura por lote que devuelve `version` (C4/C6) y escritura administrativa `POST`/`PATCH` que versiona por vigencia (no sobrescribe, P8) y emite `catalogo.actualizado` en la misma transacción (P17). Desactivar un valor es un `PATCH` a `estado: inactivo` que crea una nueva versión y no rompe la historia (E5-HU-023).
+
+**Decisiones de la sesión:**
+- **A1 — Autorización por rol diferida:** DEC-047 #1 pide que sólo los Coordinadores creen líneas de transporte. No se implementa en E5-T3: `catalogos` no tiene aún mecanismo de autorización por rol de negocio y el contrato no da gancho por tipo. La escritura no distingue rol; queda anotado en `internal/tipos/doc.go` y en el README.
+- **B2 — Subtipo en el evento:** `catalogo.actualizado` usa `entidad = "valor_catalogo"` para las cinco listas (comparten tabla) y lleva en el payload mínimo un `tipo` con la lista concreta (p. ej. `lineas_transporte`), para que el consumidor invalide caché por lista sin releer. Sigue siendo metadato (tipo + identidad), nunca el contenido; el `AgregadoID` (clave de orden) sigue siendo la identidad del valor.
+
+**Cambios:**
+- `migrations/catalogos/0006_valor_catalogo.sql` (nuevo): tabla `valor_catalogo` versionada por vigencia (PK `(id, version)`), con índice único parcial de versión vigente, índice de lectura por lote `(tipo)` e índice único `(tipo, codigo)` entre vigentes. El `tipo` se valida en el caso de uso, no con un CHECK (agregar una lista futura no debe exigir migración de constraint). Sin geometría para `zonas_riesgo` (DEC-017).
+- `migrations/catalogos/0007_valor_catalogo_grants.sql` (nuevo): privilegio mínimo — SELECT/INSERT y UPDATE solo de `vigente_hasta`, sin DELETE (P8).
+- `internal/outbox.go`: `EntidadActualizada` gana el campo opcional `SubTipo`; cuando viene, se agrega como `tipo` al payload (B2). Las entidades de una sola tabla (cliente/contrato/sla/custodio/vehiculo) no lo llevan.
+- `internal/tipos/tipos.go` (nuevo): repositorio con `Listar` (cursor, por `tipo`), `Crear` y `Actualizar` (C7) con `pgx.BeginFunc` + outbox en la misma tx (P17). `ValidarTipo` rechaza un `tipo` fuera del enum (el handler lo traduce a 400). `escanearValores` mapea `version` pero no las vigencias (el schema `ValorCatalogo` no las expone).
+- `internal/tipos/doc.go`: reescrito — C8 implementada; nota del pendiente de autorización por rol (A1).
+- `catalogos.go`: `ConsultasAPI` gana `ListarValoresCatalogo`; `ComandosAPI` gana `CrearValorCatalogo` y `ActualizarValorCatalogo`; `Routes()` monta `GET`/`POST /api/v1/catalogos-tipo/{tipo}` y `PATCH /api/v1/catalogos-tipo/{tipo}/{id}`. Cableado de `*tipos.Repositorio` en `New`/`Module`. Tipo inválido ⇒ validación (400); valor no encontrado ⇒ 404 (I3).
+- `internal/tipos/tipos_test.go` (nuevo): unitarias de `ValidarTipo` (acepta los cinco, rechaza desconocidos).
+- `internal/outbox_test.go`: dos unitarias nuevas para B2 (subtipo presente en `valor_catalogo`; ausente en entidades de una sola tabla).
+- `internal/tipos/tipos_integracion_test.go` (nuevo): integración contra Postgres — alta que emite evento con subtipo (P17/B2), desactivación que no rompe la historia (E5-HU-023/P8), lectura por lote acotada al tipo (C4/C6), y rechazo de tipo inválido. Se saltan sin `CATALOGOS_TEST_DB`.
+- `migrations/grants_integration_test.go`: aserciones de `valor_catalogo` (INSERT y cerrar vigencia permitidos; DELETE y UPDATE de otra columna denegados, P8).
+- `README.md`: `tipos` pasa a implementado; C8 cerrada en la tabla de brechas; sección de catálogos de tipo con el pendiente A1; corrección del diferido a V2 (geometría de zonas, no la lista; kit de seguridad retirado).
+
+**Verificado:** `go build ./...` y `go vet ./...` limpios; `gofmt` aplicado a los archivos nuevos/tocados. Pruebas unitarias en verde (`internal`, `internal/tipos`). Las pruebas de integración (`tipos`, `custodios`, `vehiculos`, `TestGrants`) requieren Postgres y `CATALOGOS_TEST_DB`; no se ejecutaron en este entorno (sin base), igual que compilan y siguen el patrón ya probado de E5-T1/T2.
+
+**Pendiente:** C5 y C10 siguen abiertas (otras historias). Autorización por rol de líneas (A1) anotada, sin implementar. `cmd/api` aún no aplica migraciones al arrancar (TODO).
+
+**Archivos modificados:**
+- `catalogos.go`
+- `internal/outbox.go`
+- `internal/outbox_test.go`
+- `internal/tipos/tipos.go`
+- `internal/tipos/tipos_test.go`
+- `internal/tipos/tipos_integracion_test.go`
+- `internal/tipos/doc.go`
+- `migrations/catalogos/0006_valor_catalogo.sql`
+- `migrations/catalogos/0007_valor_catalogo_grants.sql`
+- `migrations/grants_integration_test.go`
+- `README.md`
+
+## 2026:10:15 (E5-T2 — superficie de custodios sobre tracer.8)
+
+**Resumen:** Se implementa la superficie completa del sub-módulo `custodios` (E5-T2 / AI27-74) sobre el contrato `v0.1.0-tracer.8`, espejando la vertical de vehículos de E5-T1. Lectura paginada y por lote, lectura vigente o a una fecha con `version`, aptitud informativa, y escritura administrativa `POST`/`PATCH` que versiona por vigencia (no sobrescribe, P8) y emite `catalogo.actualizado` en la misma transacción (P17). El custodio referencia al usuario de `identidad` por identificador (`usuario_id`), nunca por FK entre schemas (P1).
+
+**Cambios:**
+- `go.mod`: pin de `api-client-go` subido de `v0.1.0-tracer.6` a `v0.1.0-tracer.8`. El cliente publicado de tracer.6 no traía la superficie de escritura de custodios (sin `CustodioEntrada`/`CustodioCambios` ni `version`/`usuario_id`/vigencias en `Custodio`); tracer.8 la publica. Sin `replace` local.
+- `migrations/catalogos/0005_custodio_cols.sql` (nuevo): `ALTER TABLE catalogos.custodio ADD COLUMN telefono TEXT`. La tabla `custodio` ya existía desde `0001` (versionada por vigencia) y sus grants desde `0002`; esta migración solo agrega el atributo de contacto que el contrato expone. No requiere fase de grants nueva: `0002` otorga SELECT/INSERT (nivel tabla) y UPDATE solo de `vigente_hasta` sobre `custodio`.
+- `internal/custodios/custodios.go` (nuevo): repositorio con `Listar` (cursor), `ListarPorLote` (C4), `Obtener` (vigente o a una fecha, C9), `Aptitud` (informativa por `estado`, DEC-055), `Crear` y `Actualizar` (C7) con `pgx.BeginFunc` + outbox en la misma tx (P17, `Entidad: "custodio"`). `escanearCustodios` mapea `version` y vigencia (C6); helper `textoUUID` para el `usuario_id` TEXT↔UUID. A diferencia de vehículo: sin `cliente_id`, enums `activo`/`inactivo`, y la aptitud no evalúa documentos (no existe tabla).
+- `catalogos.go`: `ConsultasAPI` ampliada (`ListarCustodios`, `ListarCustodiosPorLote`, `ObtenerCustodio`); `ComandosAPI` ampliada (`CrearCustodio`, `ActualizarCustodio`); `AptitudCustodio` deja de ser stub. `Routes()` monta `GET /custodios` (con `?ids` para lote, excluyente con `cursor`), `POST /custodios`, `GET /custodios/{id}` (con `?a_fecha`), `PATCH /custodios/{id}` y la aptitud. Reutiliza los helpers de vehículos.
+- `internal/custodios/custodios_test.go` (nuevo): 3 pruebas unitarias de aptitud (fake de `pgx.Row`; la aptitud del custodio hace un solo `QueryRow`).
+- `internal/custodios/custodios_integracion_test.go` (nuevo): integración contra Postgres — `TestCrear_EmiteEventoEnLaMismaTx` (P17), `TestActualizar_CreaNuevaVersionSinSobrescribir` (P8/C9), `TestActualizar_ConUsuarioId` (round-trip de `usuario_id`, P1), `TestListarPorLote` (C4). Se saltan sin `CATALOGOS_TEST_DB`.
+- `migrations/grants_integration_test.go`: se agrega la aserción de que `svc_catalogos` puede cerrar la vigencia de un custodio (UPDATE `vigente_hasta`) y NO puede reescribir una versión (UPDATE `nombre` denegado, P8).
+- `README.md`: pin a `tracer.8`; `custodios` pasa de scaffolding a implementado; tabla de brechas y pendientes de modelado de E5-T2.
+
+**Decisiones de modelado (reportadas, pendientes de Operación/Lead):**
+- `GET /custodios/{id}/aptitud` recibe `cliente_id` obligatorio por contrato (simetría con vehículo), pero el custodio no pertenece a un cliente: el parámetro se acepta y **no acota** la evaluación. La aptitud es por `estado` (DEC-055, informativa).
+- El contrato expone `telefono`; se agregó la columna. Documentos de aptitud del custodio quedan "Por confirmar" (E5-HU-022): no se crea tabla sin consumidor.
+
+**Verificado:** `go build ./...`, `go vet ./...` limpios; `arch-test@v0.1.1` OK (catalogos sigue hoja). Pruebas de integración ejecutadas contra Postgres 18 real (Docker): `custodios`, `vehiculos` y `TestGrants` en verde. `go build ./cmd/api` OK (I5 standalone).
+
+**Pendiente:** C5, C8 y C10 siguen abiertas (otras historias). `cmd/api` aún no aplica migraciones al arrancar (TODO).
+
+**Archivos modificados:**
+- `go.mod`, `go.sum`
+- `catalogos.go`
+- `internal/custodios/custodios.go`
+- `internal/custodios/custodios_test.go`
+- `internal/custodios/custodios_integracion_test.go`
+- `migrations/catalogos/0005_custodio_cols.sql`
+- `migrations/grants_integration_test.go`
+- `README.md`
+
 ## 2026:10:13 (E5-T1 — superficie de vehículos sobre tracer.6)
 
 **Resumen:** Se implementa la superficie completa del sub-módulo `vehiculos` (E5-T1 / AI27-73) sobre el contrato `v0.1.0-tracer.6`, que cerró las brechas C3/C4/C6/C7/C9 de catálogos. Lectura paginada y por lote, lectura vigente o a una fecha con `version`, aptitud informativa, y escritura administrativa `POST`/`PATCH` que versiona por vigencia (no sobrescribe, P8) y emite `catalogo.actualizado` en la misma transacción (P17).
