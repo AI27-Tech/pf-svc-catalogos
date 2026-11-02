@@ -1,5 +1,20 @@
 # CHANGELOG
 
+## 2026:11:02 16:56 — Prueba de la fachada en proceso para tipos de servicio (E9-T4)
+
+**Para quién:** `pf-svc-core`, que cablea `ListarTiposServicio` del bff v0.1.12 en proceso. Para quien mantiene el servicio: deja fijada la superficie de la que core depende.
+
+**Resumen:** no hace falta código nuevo. `ConsultasAPI.ListarValoresCatalogo(ctx, tipo, cursor)` ya existe y es justo lo que llama el handler `GET /api/v1/catalogos-tipo/{tipo}`. core la llama con `catclient.TiposServicio` y `params.Cursor`, igual que el adaptador HTTP del bff fija el tipo. Se agrega una prueba de integración que la ejercita por la fachada.
+
+**Cambios:**
+- `consultas_integration_test.go` (nuevo): con un valor de `tipos_servicio` y otro de `lineas_transporte`, `Consultas().ListarValoresCatalogo(ctx, TiposServicio, nil)` devuelve solo `CUSTODIA-ARMADA` sin cursor siguiente; un tipo fuera del enum (`rutas`) da `Validacion`.
+
+**Sin cambio de contrato, de pin ni de HTTP.**
+
+**Archivos modificados:**
+- `consultas_integration_test.go`
+- `CHANGELOG.md`
+
 ## 2026-10-27 (E8-T11 — listado de clientes para el selector de creación de viaje)
 
 **Resumen:** Se implementa `listarClientes` → `GET /api/v1/clientes` (sub-módulo `cliente` en `internal/clientes`, `RepositorioCliente`), hasta ahora en scaffold (`ObtenerCliente` seguía `errNoImplementado`). Es el selector de cliente para crear un viaje por Operación (E8-T11, DEC-026 #3). Solo lectura, paginado por cursor sobre la versión vigente, igual patrón que vehículos/custodios. El contrato (`listarClientes`/`PaginaClientes`/`Cliente`) ya existía desde tracer.8; esta ola le da cuerpo en el servicio. Sin cambio de contrato ni de pin.
