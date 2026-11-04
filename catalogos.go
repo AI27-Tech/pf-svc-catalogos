@@ -28,6 +28,7 @@ import (
 	"github.com/AI27-Tech/pf-pkg-platform-go/worker"
 	"github.com/AI27-Tech/pf-svc-catalogos/internal/clientes"
 	"github.com/AI27-Tech/pf-svc-catalogos/internal/custodios"
+	"github.com/AI27-Tech/pf-svc-catalogos/internal/gps"
 	"github.com/AI27-Tech/pf-svc-catalogos/internal/sla"
 	"github.com/AI27-Tech/pf-svc-catalogos/internal/tipos"
 	"github.com/AI27-Tech/pf-svc-catalogos/internal/vehiculos"
@@ -86,6 +87,7 @@ type Module struct {
 	contratos *clientes.RepositorioContrato
 	clientes  *clientes.RepositorioCliente
 	sla       *sla.Repositorio
+	gps       *gps.Repositorio
 }
 
 // New construye el módulo con sus pools y puertos ya resueltos. No lee entorno
@@ -100,6 +102,7 @@ func New(p Pools, d Deps) (*Module, error) {
 		contratos: clientes.NewRepositorioContrato(p.Catalogos),
 		clientes:  clientes.NewRepositorioCliente(p.Catalogos),
 		sla:       sla.NewRepositorio(p.Catalogos),
+		gps:       gps.NewRepositorio(p.Catalogos),
 	}, nil
 }
 
@@ -242,6 +245,21 @@ func (m *Module) Routes(mux *http.ServeMux) {
 			cursor = &cursorRaw
 		}
 		pag, err := q.ListarClientes(r.Context(), cursor)
+		if err != nil {
+			escribirError(w, err)
+			return
+		}
+		escribirJSON(w, http.StatusOK, pag)
+	})
+
+	// --- GPS (selector de la ficha técnica, E8-T12 / DEC-104 #5). Solo lectura:
+	// GET /api/v1/gps, paginado por cursor, solo dispositivos activos.
+	mux.HandleFunc("GET /api/v1/gps", func(w http.ResponseWriter, r *http.Request) {
+		var cursor *catclient.Cursor
+		if cursorRaw := r.URL.Query().Get("cursor"); cursorRaw != "" {
+			cursor = &cursorRaw
+		}
+		pag, err := q.ListarGps(r.Context(), cursor)
 		if err != nil {
 			escribirError(w, err)
 			return
@@ -685,6 +703,10 @@ type ConsultasAPI interface {
 	// cinco catálogos de tipo de V1 (E5-T3), paginada por cursor; cursor nil
 	// arranca desde el principio. Un `tipo` fuera del enum es error de validación.
 	ListarValoresCatalogo(ctx context.Context, tipo catclient.TipoCatalogo, cursor *catclient.Cursor) (*catclient.PaginaValoresCatalogo, error)
+	// ListarGps devuelve una página de dispositivos GPS ACTIVOS, paginada por
+	// cursor (selector de la ficha técnica, E8-T12 / DEC-104 #5); cursor nil
+	// arranca desde el principio. Un cursor que no es id es error de validación.
+	ListarGps(ctx context.Context, cursor *catclient.Cursor) (*catclient.PaginaGps, error)
 }
 
 // ComandosAPI es la superficie de ESCRITURA administrativa de catalogos (E5,
@@ -748,6 +770,17 @@ func (c *consultas) ObtenerCliente(ctx context.Context, id catclient.Id) (*catcl
 
 func (c *consultas) ListarClientes(ctx context.Context, cursor *catclient.Cursor) (*catclient.PaginaClientes, error) {
 	pag, err := c.m.clientes.Listar(ctx, cursor)
+	if err != nil {
+		return nil, err
+	}
+	return &pag, nil
+}
+
+func (c *consultas) ListarGps(ctx context.Context, cursor *catclient.Cursor) (*catclient.PaginaGps, error) {
+	pag, err := c.m.gps.Listar(ctx, cursor)
+	if errors.Is(err, gps.ErrCursorInvalido) {
+		return nil, platformerrors.NewValidacion("cursor inválido")
+	}
 	if err != nil {
 		return nil, err
 	}
