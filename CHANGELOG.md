@@ -1,5 +1,15 @@
 # CHANGELOG
 
+## 2026:11:04 16:40 — platform-go v0.1.9: un token sin rol ni audiencia se rechaza
+
+**Para quién:** quien llama a `catalogos` con un token. Un token verificado que no trae claim `audiencia` ni `rol` ahora recibe 401 `no_autorizado`; antes se tomaba como audiencia Interno, que no se acota por tenant (DEC-129). Los tokens con `audiencia` explícita, con `rol` `cliente` o con cualquiera de los roles internos se comportan igual que antes.
+
+**Cambios:**
+- `go.mod`/`go.sum`: `pf-pkg-platform-go` v0.1.0 → v0.1.9 (PR #41 de platform-go). Sin cambio de código.
+- `go mod tidy` subió los indirectos que exige platform-go v0.1.9: `golang.org/x/sync` v0.23.0, `golang.org/x/sys` v0.48.0, `golang.org/x/text` v0.42.0.
+
+**Verificación:** `gofmt` limpio, `go vet ./...`, `go build ./...` (incluye `./cmd/...`), `go test ./...` sin BD y con `CATALOGOS_TEST_DB` (Postgres 16 local), `arch-test` (v0.1.1 del CI y v0.1.9) en verde. Ninguna prueba arma un token sin rol contra el `auth.Verifier` real (las que usan claims sin rol pasan por autenticadores falsos), así que no se tocó ningún fixture.
+
 ## 2026:11:02 16:56 — Prueba de la fachada en proceso para tipos de servicio (E9-T4)
 
 **Para quién:** `pf-svc-core`, que cablea `ListarTiposServicio` del bff v0.1.12 en proceso. Para quien mantiene el servicio: deja fijada la superficie de la que core depende.
