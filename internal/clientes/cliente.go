@@ -2,6 +2,7 @@ package clientes
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	catclient "github.com/AI27-Tech/pf-pkg-contracts/packages/api-client-go/catalogos"
@@ -76,6 +77,44 @@ func (r *RepositorioCliente) Listar(ctx context.Context, cursor *catclient.Curso
 		items = items[:paginaClientes]
 	}
 	return catclient.PaginaClientes{Items: items, CursorSiguiente: siguiente}, nil
+}
+
+// ErrClienteNoEncontrado indica que el cliente no tiene versión vigente.
+var ErrClienteNoEncontrado = errors.New("clientes: cliente no encontrado")
+
+// Obtener devuelve la versión vigente de un cliente, ACTIVO o INACTIVO: a
+// diferencia del selector, la lectura por id compone datos de un viaje que ya
+// existe (p. ej. el detalle de emergencia de Reacción), y un cliente dado de baja
+// después sigue siendo el cliente de ese viaje. Resuelve `contrato_vigente_id`
+// (el contrato lo promete: "expediente y su contrato vigente"); el índice
+// un_contrato_vigente_por_cliente garantiza a lo más uno. Devuelve
+// ErrClienteNoEncontrado si no hay versión vigente.
+func (r *RepositorioCliente) Obtener(ctx context.Context, id catclient.Id) (catclient.Cliente, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT c.id, c.nombre, c.estado,
+		       (SELECT ct.id FROM catalogos.contrato ct
+		         WHERE ct.cliente_id = c.id AND ct.vigente_hasta IS NULL)
+		  FROM catalogos.cliente c
+		 WHERE c.id = $1 AND c.vigente_hasta IS NULL`, id)
+	if err != nil {
+		return catclient.Cliente{}, fmt.Errorf("clientes: obtener: %w", err)
+	}
+	cl, err := pgx.CollectOneRow(rows, func(row pgx.CollectableRow) (catclient.Cliente, error) {
+		var (
+			cl     catclient.Cliente
+			estado string
+		)
+		err := row.Scan(&cl.Id, &cl.Nombre, &estado, &cl.ContratoVigenteId)
+		cl.Estado = catclient.ClienteEstado(estado)
+		return cl, err
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return catclient.Cliente{}, ErrClienteNoEncontrado
+	}
+	if err != nil {
+		return catclient.Cliente{}, fmt.Errorf("clientes: obtener: %w", err)
+	}
+	return cl, nil
 }
 
 // escanearClientes mapea las filas (con columnas = `columnasCliente`) a
