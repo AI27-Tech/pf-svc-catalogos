@@ -125,6 +125,9 @@ func TestGrants(t *testing.T) {
 		fmt.Sprintf(`UPDATE catalogos.valor_catalogo SET vigente_hasta = now() WHERE id = '%s' AND version = 1`, valorID),
 		"svc_catalogos debe poder cerrar la vigencia de un valor de catálogo")
 
+	// GPS (0009/0010, DEC-104 #5): solo lectura en V1.
+	mustExec(t, ctx, pool, `SELECT 1 FROM catalogos.gps`, "svc_catalogos debe poder leer el catálogo de GPS")
+
 	// Publicar catalogo.actualizado con el publicador real, en una tx.
 	inTx(t, ctx, pool, "svc_catalogos debe poder publicar en su outbox", func(tx pgx.Tx) error {
 		return outbox.NewPublisher().Publish(ctx, tx, outbox.Event{
@@ -165,6 +168,10 @@ func TestGrants(t *testing.T) {
 		{`UPDATE catalogos.valor_catalogo SET etiqueta = 'otra'`, "permission denied for table valor_catalogo",
 			"no se reescribe una versión de valor: solo se cierra su vigencia (P8)"},
 		{`DELETE FROM catalogos.outbox`, "permission denied for table outbox", "no se borra el outbox"},
+		{`INSERT INTO catalogos.gps (id, identificador) VALUES (gen_random_uuid(), 'x')`, "permission denied for table gps",
+			"el catálogo de GPS es de solo lectura en V1"},
+		{`UPDATE catalogos.gps SET activo = false`, "permission denied for table gps",
+			"el catálogo de GPS es de solo lectura en V1"},
 		{`UPDATE catalogos.inbox_evento SET tipo = 'x'`, "permission denied for table inbox_evento",
 			"el inbox no se reescribe"},
 		{`DELETE FROM catalogos.inbox_evento`, "permission denied for table inbox_evento", "el inbox no se borra"},

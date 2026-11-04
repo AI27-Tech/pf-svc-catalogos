@@ -1,5 +1,32 @@
 # CHANGELOG
 
+## 2026:11:04 16:51 — Catálogo de GPS: `listarGps` (E8-T12, DEC-104 #5, `tracer.37`)
+
+**Para quién:** el `bff` y `pf-svc-core`. El selector de GPS de la ficha técnica (E8-T12) corría contra un mock porque el catálogo de GPS no existía. Para quien mantiene el servicio: una tabla nueva, de solo lectura.
+
+**Resumen:** monta `listarGps` (`GET /api/v1/gps`) y lo agrega a `ConsultasAPI`. Devuelve `PaginaGps`: dispositivos `{id, identificador, activo}`, **solo los activos** (el filtro es del servidor, DEC-104 #5), ordenados por `id`, 50 por página con cursor (el `id` del último, como `listarClientes`).
+
+**Comportamiento:**
+- Un dispositivo inactivo no aparece en el selector, pero su fila no se borra: la ficha que ya lo referencia conserva el `id`.
+- Cursor que no es un `id`: 400 (`Validacion`), por fachada y HTTP.
+- Sin guarda de rol en `catalogos`, igual que el resto de sus rutas: la aplica el `bff`.
+
+**Cambios:**
+- `go.mod`/`go.sum`: `api-client-go` `v0.1.0-tracer.8` → `v0.1.0-tracer.37` (commit aparte). Compila sin renombrar constantes.
+- `migrations/catalogos/0009_gps.sql` (nuevo): tabla `catalogos.gps (id, identificador, activo, creado_en)` e índice parcial de activos. Idempotente. Tabla plana sin versionado por vigencia porque en V1 no hay escritura por API; comentario `shortcut` con el criterio para versionarla.
+- `migrations/catalogos/0010_gps_grants.sql` (nuevo): `GRANT SELECT` a `svc_catalogos`, nada más.
+- `internal/gps/gps.go` (nuevo): `Repositorio.Listar`.
+- `catalogos.go`: ruta `GET /api/v1/gps`, campo `gps` del módulo, `ConsultasAPI.ListarGps`.
+- Pruebas: `TestConsultasListarGps` (dos activos y uno inactivo: la fachada y HTTP devuelven `MOVIL ST1001` y `MOVIL ST7916` en orden, sin el inactivo; cursor inválido 400 por ambos caminos). `TestGrants`: `svc_catalogos` lee `catalogos.gps` y no puede insertar ni actualizar.
+
+**Migración:** `0009_gps.sql` y `0010_gps_grants.sql`. Los valores reales de los ~100 dispositivos los carga Operación (DEC-047); no hay semilla.
+
+**Archivos modificados:**
+- `go.mod`, `go.sum`
+- `migrations/catalogos/0009_gps.sql`, `migrations/catalogos/0010_gps_grants.sql`, `migrations/grants_integration_test.go`
+- `internal/gps/gps.go`, `catalogos.go`, `consultas_integration_test.go`
+- `CHANGELOG.md`
+
 ## 2026:11:02 16:56 — Prueba de la fachada en proceso para tipos de servicio (E9-T4)
 
 **Para quién:** `pf-svc-core`, que cablea `ListarTiposServicio` del bff v0.1.12 en proceso. Para quien mantiene el servicio: deja fijada la superficie de la que core depende.
