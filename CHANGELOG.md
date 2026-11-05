@@ -1,5 +1,27 @@
 # CHANGELOG
 
+## 2026:11:04 17:47 — `obtenerCliente` deja de ser scaffold (detalle de emergencia de Reacción)
+
+**Para quién:** el `bff` y `pf-svc-core`. En el recorrido de demo sobre core, `GET /api/v1/panel/emergencias/{eid}` respondía 502 `roto`: el `bff` compone `viaje.cliente_nombre` con `ConsultasAPI.ObtenerCliente`, que seguía devolviendo `errNoImplementado`. Para quien mantiene el servicio: una lectura nueva sobre `catalogos.cliente`, sin migración.
+
+**Resumen:** implementa `obtenerCliente` por fachada y monta `GET /api/v1/clientes/{id}` (el adaptador HTTP del `bff` lo usa cuando catalogos no está co-ubicado). Devuelve la versión vigente del cliente, `activo` o `inactivo`, con `contrato_vigente_id` resuelto.
+
+**Comportamiento:**
+- Un cliente inactivo se devuelve: sigue siendo el cliente de su viaje. El filtro a activos es solo del selector (`listarClientes`, DEC-101 #1).
+- `contrato_vigente_id` es el contrato vigente del cliente, o `null` si no tiene. El índice `un_contrato_vigente_por_cliente` garantiza a lo más uno. El listado sigue devolviéndolo `null`, sin cambio.
+- Id inexistente: 404 (`NoEncontrado`). Id que no es uuid: 400 (`Validacion`).
+- `ObtenerVehiculo` y `ObtenerCustodio`, los otros dos que compone el detalle, ya estaban implementados. Ya no queda ningún método en scaffold; se borra `errNoImplementado`.
+
+**Cambios:**
+- `internal/clientes/cliente.go`: `RepositorioCliente.Obtener` y `ErrClienteNoEncontrado`.
+- `catalogos.go`: `consultas.ObtenerCliente` traduce no encontrado a `NoEncontrado`; ruta `GET /api/v1/clientes/{id}`; comentarios de scaffold actualizados.
+- `ports.go`: se elimina `errNoImplementado` (sin usos).
+- Pruebas: `TestConsultasObtenerCliente` (versión vigente `Transportes Norte` con contrato `…a1` sobre una versión cerrada; `Fletes Baja` inactivo sin contrato; inexistente `NoEncontrado`; por HTTP 200, 200, 404 y 400).
+
+**Archivos modificados:**
+- `internal/clientes/cliente.go`, `catalogos.go`, `ports.go`, `consultas_integration_test.go`
+- `CHANGELOG.md`
+
 ## 2026:11:04 16:51 — Catálogo de GPS: `listarGps` (E8-T12, DEC-104 #5, `tracer.37`)
 
 **Para quién:** el `bff` y `pf-svc-core`. El selector de GPS de la ficha técnica (E8-T12) corría contra un mock porque el catálogo de GPS no existía. Para quien mantiene el servicio: una tabla nueva, de solo lectura.

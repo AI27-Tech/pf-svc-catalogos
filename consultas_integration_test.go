@@ -16,6 +16,7 @@ import (
 	catalogos "github.com/AI27-Tech/pf-svc-catalogos"
 	"github.com/AI27-Tech/pf-svc-catalogos/internal/dbtest"
 	"github.com/AI27-Tech/pf-svc-catalogos/migrations"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -130,5 +131,62 @@ func TestConsultasListarGps(t *testing.T) {
 	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/gps?cursor=no-es-id", nil))
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("HTTP cursor inválido: status %d, quiere 400", rec.Code)
+	}
+}
+
+// TestConsultasObtenerCliente: el detalle de emergencia de Reacción compone
+// `cliente_nombre` con obtenerCliente. Devuelve la versión vigente, también de un
+// cliente inactivo (sigue siendo el cliente de su viaje), igual por fachada y por
+// GET /api/v1/clientes/{id}; un id inexistente es NoEncontrado (404) y un id que
+// no es uuid es 400.
+func TestConsultasObtenerCliente(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	m := moduloConCatalogos(t, ctx)
+	admin, closeAdmin := dbtest.AdminConn(t, ctx)
+	defer closeAdmin()
+	dbtest.Exec(t, ctx, admin, `INSERT INTO catalogos.cliente (id, version, nombre, estado, vigente_hasta) VALUES
+		('00000000-0000-0000-0000-0000000000c1', 1, 'Transportes Norte Viejo', 'activo', now())`)
+	dbtest.Exec(t, ctx, admin, `INSERT INTO catalogos.cliente (id, version, nombre, estado) VALUES
+		('00000000-0000-0000-0000-0000000000c1', 2, 'Transportes Norte', 'activo'),
+		('00000000-0000-0000-0000-0000000000c2', 1, 'Fletes Baja', 'inactivo')`)
+	dbtest.Exec(t, ctx, admin, `INSERT INTO catalogos.contrato (id, version, cliente_id, vigente_hasta) VALUES
+		('00000000-0000-0000-0000-0000000000a0', 1, '00000000-0000-0000-0000-0000000000c1', now())`)
+	dbtest.Exec(t, ctx, admin, `INSERT INTO catalogos.contrato (id, version, cliente_id) VALUES
+		('00000000-0000-0000-0000-0000000000a1', 1, '00000000-0000-0000-0000-0000000000c1')`)
+
+	cl, err := m.Consultas().ObtenerCliente(ctx, uuid.MustParse("00000000-0000-0000-0000-0000000000c1"))
+	if err != nil {
+		t.Fatalf("ObtenerCliente(c1): %v", err)
+	}
+	if cl.Nombre != "Transportes Norte" || cl.Estado != "activo" || cl.ContratoVigenteId == nil || cl.ContratoVigenteId.String() != "00000000-0000-0000-0000-0000000000a1" {
+		t.Fatalf("c1: got %+v, want Transportes Norte activo con contrato vigente a1", cl)
+	}
+	cl, err = m.Consultas().ObtenerCliente(ctx, uuid.MustParse("00000000-0000-0000-0000-0000000000c2"))
+	if err != nil || cl.Nombre != "Fletes Baja" || cl.Estado != "inactivo" || cl.ContratoVigenteId != nil {
+		t.Fatalf("c2: got %+v err %v, want Fletes Baja inactivo sin contrato", cl, err)
+	}
+	_, err = m.Consultas().ObtenerCliente(ctx, uuid.MustParse("00000000-0000-0000-0000-0000000000c9"))
+	if got := platformerrors.AsCategory(err); got != platformerrors.CategoryNoEncontrado {
+		t.Fatalf("inexistente: got categoría %v (err %v), want NoEncontrado", got, err)
+	}
+
+	mux := http.NewServeMux()
+	m.Routes(mux)
+	for _, tc := range []struct {
+		ruta   string
+		status int
+		cuerpo string
+	}{
+		{"/api/v1/clientes/00000000-0000-0000-0000-0000000000c1", http.StatusOK, `"contrato_vigente_id":"00000000-0000-0000-0000-0000000000a1"`},
+		{"/api/v1/clientes/00000000-0000-0000-0000-0000000000c2", http.StatusOK, `"estado":"inactivo"`},
+		{"/api/v1/clientes/00000000-0000-0000-0000-0000000000c9", http.StatusNotFound, ""},
+		{"/api/v1/clientes/no-es-id", http.StatusBadRequest, ""},
+	} {
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, tc.ruta, nil))
+		if rec.Code != tc.status || !strings.Contains(rec.Body.String(), tc.cuerpo) {
+			t.Errorf("GET %s: status %d cuerpo %s; quiere %d con %q", tc.ruta, rec.Code, rec.Body, tc.status, tc.cuerpo)
+		}
 	}
 }
