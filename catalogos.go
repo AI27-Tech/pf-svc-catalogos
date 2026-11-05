@@ -110,8 +110,8 @@ func New(p Pools, d Deps) (*Module, error) {
 // monta las operaciones presentes en la versión fijada de catalogos.yaml
 // (contrato primero, 00 regla 6). Hoy monta vehículos (E5-T1), custodios
 // (E5-T2), catálogos de tipo (E5-T3) y contratos/SLA (E5-T4), todas cerradas en
-// tracer.8. El listado de clientes (selector, E8-T11) también se monta; el
-// obtener-expediente de cliente sigue en scaffold (brecha C5).
+// tracer.8. También monta el listado de clientes (selector, E8-T11) y la lectura
+// de un cliente por id (detalle de emergencia de Reacción).
 func (m *Module) Routes(mux *http.ServeMux) {
 	// Vehículos (superficie completa de E5-T1 sobre tracer.6). Los handlers
 	// delegan en los MISMOS casos de uso que Consultas()/Comandos() (I3): el
@@ -250,6 +250,22 @@ func (m *Module) Routes(mux *http.ServeMux) {
 			return
 		}
 		escribirJSON(w, http.StatusOK, pag)
+	})
+
+	// GET /api/v1/clientes/{id} — versión vigente, activo o inactivo (detalle de
+	// emergencia de Reacción vía el adaptador HTTP del bff).
+	mux.HandleFunc("GET /api/v1/clientes/{id}", func(w http.ResponseWriter, r *http.Request) {
+		id, err := uuid.Parse(r.PathValue("id"))
+		if err != nil {
+			escribirError(w, platformerrors.NewValidacion("id de cliente inválido"))
+			return
+		}
+		cl, err := q.ObtenerCliente(r.Context(), id)
+		if err != nil {
+			escribirError(w, err)
+			return
+		}
+		escribirJSON(w, http.StatusOK, cl)
 	})
 
 	// --- GPS (selector de la ficha técnica, E8-T12 / DEC-104 #5). Solo lectura:
@@ -661,7 +677,7 @@ func (m *Module) Consultas() ConsultasAPI {
 // vehículos (E5-T1) y custodios (E5-T2) —listado paginado y por lote, lectura
 // vigente o a una fecha, y aptitud—, la lectura por lote de los catálogos de
 // tipo (E5-T3), y la lectura de contrato/SLA vigente o a una fecha (E5-T4). La
-// lectura del expediente de cliente sigue declarada pero en scaffold. El átomo
+// lectura de un cliente por id devuelve su versión vigente. El átomo
 // es `Vehiculo` (ADR 31 §5), no `Unidad`, y la aptitud se
 // evalúa contra el contrato/SLA de un cliente (de ahí `clienteID`). La aptitud
 // es INFORMATIVA (DEC-055): nunca gatea.
@@ -757,15 +773,20 @@ func (m *Module) Comandos() ComandosAPI {
 }
 
 // consultas implementa ConsultasAPI delegando en los casos de uso del módulo.
-// vehículos, custodios, catálogos de tipo y el listado de clientes ya están
-// implementados; obtener-cliente, contrato y SLA siguen según su estado (obtener
-// cliente en scaffold).
+// Todos los métodos están implementados.
 type consultas struct {
 	m *Module
 }
 
 func (c *consultas) ObtenerCliente(ctx context.Context, id catclient.Id) (*catclient.Cliente, error) {
-	return nil, errNoImplementado("ObtenerCliente")
+	cl, err := c.m.clientes.Obtener(ctx, id)
+	if errors.Is(err, clientes.ErrClienteNoEncontrado) {
+		return nil, platformerrors.NewNoEncontrado("cliente no encontrado")
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &cl, nil
 }
 
 func (c *consultas) ListarClientes(ctx context.Context, cursor *catclient.Cursor) (*catclient.PaginaClientes, error) {
