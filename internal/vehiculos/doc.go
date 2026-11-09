@@ -11,8 +11,8 @@
 // /api/v1/vehiculos). Implementa la superficie completa de E5-T1:
 //   - lectura paginada por cursor y lectura por lote (C4);
 //   - lectura vigente o "a una fecha" (C9), con `version` en la respuesta (C6);
-//   - aptitud informativa (DEC-055), evaluada contra el contrato/SLA de un
-//     cliente (de ahí clienteID);
+//   - aptitud informativa (DEC-055), evaluada por el vehículo mismo: la flota
+//     es de AI27 y no pertenece a ningún cliente (DEC-143);
 //   - escritura administrativa `crearVehiculo`/`actualizarVehiculo` (C7), que
 //     versiona por vigencia (nunca sobrescribe, P8) y emite
 //     `catalogo.actualizado` en la misma transacción (P17).

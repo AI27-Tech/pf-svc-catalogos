@@ -148,15 +148,21 @@ func (r *Repositorio) Obtener(ctx context.Context, id catclient.Id, aFecha *catc
 	return items[0], nil
 }
 
-// Aptitud evalúa la aptitud INFORMATIVA de un vehículo para el contrato/SLA de
-// un cliente (DEC-055): activo y con documentos vigentes. NUNCA bloquea.
+// Aptitud evalúa la aptitud INFORMATIVA de un vehículo (DEC-055): activo y con
+// documentos vigentes. NUNCA bloquea.
+//
+// clienteID HOY NO restringe nada: la flota es de AI27 y un vehículo no
+// pertenece a ningún cliente (DEC-143 #3), así que se evalúa el vehículo mismo,
+// igual que custodios.Aptitud. El parámetro se conserva porque lo pasan
+// operacion y el adaptador en proceso de core, y queda para evaluar el
+// contrato/SLA del cliente si llega a aplicar.
 func (r *Repositorio) Aptitud(ctx context.Context, vehiculoID catclient.Id, clienteID catclient.Id, ahora time.Time) (catclient.Aptitud, error) {
 	var estado string
 	err := r.db.QueryRow(ctx, `
 		SELECT estado
 		  FROM catalogos.vehiculo
-		 WHERE id = $1 AND cliente_id = $2 AND vigente_hasta IS NULL`,
-		vehiculoID, clienteID).Scan(&estado)
+		 WHERE id = $1 AND vigente_hasta IS NULL`,
+		vehiculoID).Scan(&estado)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return catclient.Aptitud{}, ErrNoEncontrado
 	}
@@ -191,17 +197,19 @@ func (r *Repositorio) Aptitud(ctx context.Context, vehiculoID catclient.Id, clie
 
 // Crear da de alta un vehículo: INSERT de la versión 1 y emisión de
 // `catalogo.actualizado`, ambos en la MISMA transacción (P17). El servicio
-// asigna id y versión. Devuelve el vehículo creado.
-func (r *Repositorio) Crear(ctx context.Context, e catclient.VehiculoEntrada, clienteID catclient.Id) (catclient.Vehiculo, error) {
+// asigna id y versión. Devuelve el vehículo creado. No guarda cliente: la flota
+// es de AI27 (DEC-143 #2), así que `cliente_id` del cuerpo se ignora y la fila
+// queda con cliente_id NULL.
+func (r *Repositorio) Crear(ctx context.Context, e catclient.VehiculoEntrada) (catclient.Vehiculo, error) {
 	id := uuid.New()
 	var creado catclient.Vehiculo
 	err := pgx.BeginFunc(ctx, r.db, func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `
 			INSERT INTO catalogos.vehiculo
-			  (id, version, tipo, economico, placas, estado, cliente_id)
-			VALUES ($1, 1, $2, $3, $4, $5, $6)
+			  (id, version, tipo, economico, placas, estado)
+			VALUES ($1, 1, $2, $3, $4, $5)
 			RETURNING `+columnas,
-			id, string(e.Tipo), e.Economico, e.Placas, string(e.Estado), clienteID)
+			id, string(e.Tipo), e.Economico, e.Placas, string(e.Estado))
 		if err != nil {
 			return fmt.Errorf("insertar vehículo: %w", err)
 		}
@@ -238,7 +246,8 @@ func (r *Repositorio) Actualizar(ctx context.Context, id catclient.Id, c catclie
 			versionActual     int
 			tipo, estado      string
 			economico, placas *string
-			clienteID         uuid.UUID
+			// Se hereda tal cual: NULL desde DEC-143, o el de una fila anterior.
+			clienteID *uuid.UUID
 		)
 		err := tx.QueryRow(ctx, `
 			SELECT version, tipo, economico, placas, estado, cliente_id
