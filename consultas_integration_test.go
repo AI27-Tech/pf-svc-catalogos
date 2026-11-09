@@ -8,10 +8,12 @@ import (
 	"net/http/httptest"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	catclient "github.com/AI27-Tech/pf-pkg-contracts/packages/api-client-go/catalogos"
+	"github.com/AI27-Tech/pf-pkg-platform-go/bus"
 	platformerrors "github.com/AI27-Tech/pf-pkg-platform-go/errors"
 	platformpgx "github.com/AI27-Tech/pf-pkg-platform-go/pgxpool"
 	catalogos "github.com/AI27-Tech/pf-svc-catalogos"
@@ -59,6 +61,11 @@ func TestConsultasListarTiposServicio(t *testing.T) {
 // internal/tipos) y construye el módulo como core, con el pool svc_catalogos.
 func moduloConCatalogos(t *testing.T, ctx context.Context) *catalogos.Module {
 	t.Helper()
+	return moduloConDeps(t, ctx, catalogos.Deps{})
+}
+
+func moduloConDeps(t *testing.T, ctx context.Context, d catalogos.Deps) *catalogos.Module {
+	t.Helper()
 	const schema, role = "catalogos", "svc_catalogos"
 	admin, closeAdmin := dbtest.AdminConn(t, ctx)
 	limpiar := func(ctx context.Context) {
@@ -85,7 +92,7 @@ func moduloConCatalogos(t *testing.T, ctx context.Context) *catalogos.Module {
 		limpiar(context.Background())
 		closeAdmin()
 	})
-	m, err := catalogos.New(catalogos.Pools{Catalogos: &platformpgx.Pool{Pool: pool, Role: role}}, catalogos.Deps{})
+	m, err := catalogos.New(catalogos.Pools{Catalogos: &platformpgx.Pool{Pool: pool, Role: role}}, d)
 	if err != nil {
 		t.Fatalf("catalogos.New: %v", err)
 	}
@@ -302,5 +309,72 @@ func TestAptitudVehiculo_SinPertenencia(t *testing.T) {
 	_, err := m.Consultas().AptitudVehiculo(ctx, uuid.MustParse("00000000-0000-0000-0000-0000000000b9"), clienteA)
 	if got := platformerrors.AsCategory(err); got != platformerrors.CategoryNoEncontrado {
 		t.Fatalf("inexistente: categoría %v (err %v); quiere NoEncontrado", got, err)
+	}
+}
+
+// publicadorRegistro es un bus.Publisher que solo guarda lo que recibe.
+type publicadorRegistro struct {
+	mu     sync.Mutex
+	sobres []bus.Sobre
+}
+
+func (p *publicadorRegistro) Publish(_ context.Context, s bus.Sobre) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.sobres = append(p.sobres, s)
+	return nil
+}
+
+func (p *publicadorRegistro) copia() []bus.Sobre {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]bus.Sobre(nil), p.sobres...)
+}
+
+// TestRelayPublicaCatalogoActualizado (DT-22): con BusPublisher, el módulo
+// aporta el relay de su outbox; el alta de un vehículo sale al bus como
+// catalogo.actualizado y su fila queda publicada. Sin BusPublisher no hay
+// workers (standalone sin bus).
+func TestRelayPublicaCatalogoActualizado(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if w := moduloConCatalogos(t, ctx).Workers(); len(w) != 0 {
+		t.Fatalf("sin BusPublisher: %d workers; quiere 0", len(w))
+	}
+
+	pub := &publicadorRegistro{}
+	m := moduloConDeps(t, ctx, catalogos.Deps{BusPublisher: pub})
+	workers := m.Workers()
+	if len(workers) != 1 || workers[0].Name() != "outbox-relay:catalogos" {
+		t.Fatalf("workers = %v; quiere solo outbox-relay:catalogos", workers)
+	}
+	v, err := m.Comandos().CrearVehiculo(ctx, catclient.VehiculoEntrada{Tipo: catclient.Coche, Estado: catclient.Activa})
+	if err != nil {
+		t.Fatalf("CrearVehiculo: %v", err)
+	}
+
+	runCtx, stop := context.WithCancel(ctx)
+	hecho := make(chan error, 1)
+	go func() { hecho <- workers[0].Run(runCtx) }()
+	for len(pub.copia()) == 0 && ctx.Err() == nil {
+		time.Sleep(50 * time.Millisecond)
+	}
+	stop()
+	if err := <-hecho; err != nil {
+		t.Fatalf("relay.Run: %v", err)
+	}
+
+	sobres := pub.copia()
+	if len(sobres) != 1 || sobres[0].Tipo != "catalogo.actualizado" || sobres[0].AgregadoID != v.Id.String() {
+		t.Fatalf("sobres = %+v; quiere un catalogo.actualizado de %s", sobres, v.Id)
+	}
+	admin, closeAdmin := dbtest.AdminConn(t, ctx)
+	defer closeAdmin()
+	var pendientes int
+	if err := admin.QueryRow(ctx, `SELECT count(*) FROM catalogos.outbox WHERE publicado = false`).Scan(&pendientes); err != nil {
+		t.Fatalf("contar pendientes: %v", err)
+	}
+	if pendientes != 0 {
+		t.Errorf("filas pendientes en catalogos.outbox = %d; quiere 0", pendientes)
 	}
 }

@@ -1,5 +1,21 @@
 # CHANGELOG
 
+## 2026:11:09 16:40 — El relay de outbox publica `catalogo.actualizado` (DT-22)
+
+**Para quién:** `pf-svc-core`, y a través del bus `operacion`. Cada alta o cambio de catálogo dejaba `catalogo.actualizado` en `catalogos.outbox`, pero nadie lo publicaba: `Workers()` devolvía una lista vacía. Por eso la caché de aptitud de operacion no se invalidaba con el cambio, sino al vencer su TTL de 30 s, y la tabla crecía sin drenarse. (mensajeria también consume el evento en standalone; dentro de core no tiene arista a catalogos en V1.) Para quien mantiene el servicio: sin migración; la raíz debe pasar el bus.
+
+**Resumen:** `catalogos.Deps` recibe `BusPublisher`. Con él, `New` arma el relay `outbox-relay:catalogos` (el mismo `outbox.NewRelay` de identidad) y `Workers()` lo devuelve. Sin él, nada cambia: no hay workers y el arranque standalone sigue igual.
+
+**Cambios:**
+- `catalogos.go`: campo `Deps.BusPublisher`, relay construido en `New`, `Workers()` lo devuelve. El consumidor de `sesion.revocada` sigue pendiente.
+- `consultas_integration_test.go`: `TestRelayPublicaCatalogoActualizado` (alta de vehículo → un `catalogo.actualizado` con el id del vehículo en el bus y cero filas pendientes; sin bus, cero workers). `moduloConDeps` permite pasar `Deps`.
+
+**Verificado:** `gofmt`, `go vet ./...`, `go build ./...`, `go build ./cmd/api` y `arch-test@v0.1.1` limpios. `go test -count=1 -p 1 ./...` en verde contra Postgres real (`CATALOGOS_TEST_DB`, sin pruebas saltadas).
+
+**Archivos modificados:**
+- `catalogos.go`, `consultas_integration_test.go`
+- `CHANGELOG.md`
+
 ## 2026:11:09 12:33 — La flota es de AI27, no de un cliente (DEC-143)
 
 **Para quién:** `operacion`, el `bff` y `pf-svc-core`. La aptitud de un vehículo respondía 404 cuando el viaje era de un cliente distinto al que se capturó en el alta, así que la patrulla P-101 de la demo solo resultaba apta para "Transportes Demo SA". Ahora un vehículo activo con documentos vigentes es apto para el viaje de cualquier cliente. Para quien mantiene el servicio: una migración aditiva y el alta deja de leer `cliente_id`.
