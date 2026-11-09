@@ -1,5 +1,30 @@
 # CHANGELOG
 
+## 2026:11:09 12:33 — La flota es de AI27, no de un cliente (DEC-143)
+
+**Para quién:** `operacion`, el `bff` y `pf-svc-core`. La aptitud de un vehículo respondía 404 cuando el viaje era de un cliente distinto al que se capturó en el alta, así que la patrulla P-101 de la demo solo resultaba apta para "Transportes Demo SA". Ahora un vehículo activo con documentos vigentes es apto para el viaje de cualquier cliente. Para quien mantiene el servicio: una migración aditiva y el alta deja de leer `cliente_id`.
+
+**Resumen:** el vehículo deja de pertenecer a un cliente, igual que el custodio. El alta ignora `cliente_id` del cuerpo y guarda NULL; la aptitud se evalúa por el vehículo mismo (estado y documentos, DEC-055).
+
+**Comportamiento:**
+- `POST /api/v1/vehiculos` acepta el cuerpo con o sin `cliente_id` y lo ignora: la fila queda con `cliente_id` NULL. Antes, un cuerpo sin `cliente_id` guardaba el UUID cero.
+- `PATCH /api/v1/vehiculos/{id}` hereda el `cliente_id` de la versión anterior tal cual: NULL sigue NULL y el de una fila anterior a DEC-143 se conserva.
+- `GET /api/v1/vehiculos/{id}/aptitud?cliente_id=…` ya no filtra por cliente. El parámetro sigue siendo obligatorio por contrato pero hoy no acota; queda para evaluar contrato/SLA del cliente si aplica. Vehículo inexistente: 404 (`NoEncontrado`), igual que antes.
+- Ningún evento ni payload del contrato lleva el `cliente_id` del vehículo; el schema `Vehiculo` tampoco.
+
+**Cambios:**
+- `migrations/catalogos/0011_vehiculo_sin_cliente.sql` (nuevo): `cliente_id` admite NULL. Idempotente. No borra la columna, su índice ni los datos.
+- `internal/vehiculos/vehiculos.go`: `Crear` pierde el parámetro `clienteID` y ya no inserta `cliente_id`; `Actualizar` lo lee como `*uuid.UUID` para heredar NULL; `Aptitud` quita `AND cliente_id = $2` y documenta por qué conserva el parámetro.
+- `catalogos.go`: `CrearVehiculo` ya no lee `VehiculoEntrada.ClienteId`, así que el bump a `tracer.39` (`ClienteId` pasa a `*Id`) no toca código. Comentarios de aptitud alineados.
+- `internal/vehiculos/doc.go`: la aptitud ya no se describe como evaluada contra el cliente.
+- Pruebas: `TestCrearVehiculo_FlotaSinCliente`, `TestActualizarVehiculo_ConservaCliente` y `TestAptitudVehiculo_SinPertenencia` (activo apto para dos clientes, inactivo no apto para ninguno, inexistente `NoEncontrado`). Las tres fallan sin el cambio. Los fixtures de `vehiculos_integracion_test.go` dejan de pasar `ClienteId`.
+
+**Verificado:** `gofmt`, `go vet ./...`, `go build ./...`, `go build ./cmd/api` y `arch-test@v0.1.1` limpios. `go test -count=1 -p 1 ./...` en verde contra Postgres real (`CATALOGOS_TEST_DB`, sin pruebas saltadas). `0011` aplicada dos veces seguidas sin error.
+
+**Archivos modificados:**
+- `migrations/catalogos/0011_vehiculo_sin_cliente.sql`, `internal/vehiculos/vehiculos.go`, `internal/vehiculos/doc.go`, `internal/vehiculos/vehiculos_integracion_test.go`, `catalogos.go`, `consultas_integration_test.go`
+- `CHANGELOG.md`
+
 ## 2026:11:04 17:47 — `obtenerCliente` deja de ser scaffold (detalle de emergencia de Reacción)
 
 **Para quién:** el `bff` y `pf-svc-core`. En el recorrido de demo sobre core, `GET /api/v1/panel/emergencias/{eid}` respondía 502 `roto`: el `bff` compone `viaje.cliente_nombre` con `ConsultasAPI.ObtenerCliente`, que seguía devolviendo `errNoImplementado`. Para quien mantiene el servicio: una lectura nueva sobre `catalogos.cliente`, sin migración.
