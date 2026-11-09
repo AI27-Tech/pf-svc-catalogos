@@ -678,9 +678,9 @@ func (m *Module) Consultas() ConsultasAPI {
 // vigente o a una fecha, y aptitud—, la lectura por lote de los catálogos de
 // tipo (E5-T3), y la lectura de contrato/SLA vigente o a una fecha (E5-T4). La
 // lectura de un cliente por id devuelve su versión vigente. El átomo
-// es `Vehiculo` (ADR 31 §5), no `Unidad`, y la aptitud se
-// evalúa contra el contrato/SLA de un cliente (de ahí `clienteID`). La aptitud
-// es INFORMATIVA (DEC-055): nunca gatea.
+// es `Vehiculo` (ADR 31 §5), no `Unidad`. La aptitud es INFORMATIVA (DEC-055):
+// nunca gatea, y se evalúa por el recurso mismo; `clienteID` hoy no acota
+// (DEC-143).
 type ConsultasAPI interface {
 	ObtenerCliente(ctx context.Context, id catclient.Id) (*catclient.Cliente, error)
 	// ListarClientes devuelve una página de clientes ACTIVOS vigentes, paginada
@@ -700,10 +700,10 @@ type ConsultasAPI interface {
 	// cuando aFecha no es nil (C9, lectura probatoria P8).
 	ObtenerVehiculo(ctx context.Context, id catclient.Id, aFecha *catclient.MarcaTiempo) (*catclient.Vehiculo, error)
 	// AptitudVehiculo y AptitudCustodio devuelven aptitud INFORMATIVA (DEC-055):
-	// nunca gatean, y "desconocida" es un valor válido si el dato falta. En
-	// vehiculo, clienteID acota la evaluación al contrato/SLA de ese cliente; en
-	// custodio se acepta por conformidad de contrato pero no acota (el custodio
-	// no pertenece a un cliente — ver custodios.Aptitud).
+	// nunca gatean, y "desconocida" es un valor válido si el dato falta.
+	// clienteID se acepta por conformidad de contrato pero hoy no acota: ni el
+	// vehículo (DEC-143) ni el custodio pertenecen a un cliente. Queda para
+	// evaluar contrato/SLA del cliente si aplica.
 	AptitudVehiculo(ctx context.Context, vehiculoID, clienteID catclient.Id) (*catclient.Aptitud, error)
 	AptitudCustodio(ctx context.Context, custodioID, clienteID catclient.Id) (*catclient.Aptitud, error)
 	// ListarCustodios devuelve una página de custodios vigentes (paginación por
@@ -730,14 +730,14 @@ type ConsultasAPI interface {
 // crea una nueva versión y emite `catalogo.actualizado` en la misma transacción
 // (P17), una responsabilidad distinta de leer.
 type ComandosAPI interface {
-	// CrearVehiculo da de alta un vehículo (versión 1). clienteID se toma del
-	// cuerpo del contrato (VehiculoEntrada.ClienteId).
+	// CrearVehiculo da de alta un vehículo (versión 1). Ignora
+	// VehiculoEntrada.ClienteId: la flota es de AI27, no de un cliente (DEC-143).
 	CrearVehiculo(ctx context.Context, e catclient.VehiculoEntrada) (*catclient.Vehiculo, error)
 	// ActualizarVehiculo crea una nueva versión con los campos presentes, sin
 	// sobrescribir la anterior (P8).
 	ActualizarVehiculo(ctx context.Context, id catclient.Id, c catclient.VehiculoCambios) (*catclient.Vehiculo, error)
-	// CrearCustodio da de alta un custodio (versión 1). A diferencia de vehículo,
-	// no toma cliente_id: el custodio no pertenece a un cliente.
+	// CrearCustodio da de alta un custodio (versión 1). Igual que vehículo, no
+	// toma cliente_id: el custodio no pertenece a un cliente.
 	CrearCustodio(ctx context.Context, e catclient.CustodioEntrada) (*catclient.Custodio, error)
 	// ActualizarCustodio crea una nueva versión con los campos presentes, sin
 	// sobrescribir la anterior (P8).
@@ -928,7 +928,7 @@ type comandos struct {
 }
 
 func (c *comandos) CrearVehiculo(ctx context.Context, e catclient.VehiculoEntrada) (*catclient.Vehiculo, error) {
-	v, err := c.m.vehiculos.Crear(ctx, e, e.ClienteId)
+	v, err := c.m.vehiculos.Crear(ctx, e)
 	if err != nil {
 		return nil, err
 	}

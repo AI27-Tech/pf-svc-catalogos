@@ -1,0 +1,13 @@
+-- 0011_vehiculo_sin_cliente.sql — la flota es de AI27, no de un cliente (DEC-143).
+--
+-- Un vehículo no pertenece a ningún cliente, igual que el custodio. El alta ya no
+-- guarda `cliente_id` y la aptitud ya no filtra por él, así que la columna de
+-- 0003 pasa a admitir NULL.
+--
+-- Cambio aditivo y reversible: NO se borran la columna, su índice
+-- (vehiculo_por_cliente_estado_idx) ni los datos existentes. Las filas de antes
+-- de DEC-143 conservan su cliente_id y las versiones nuevas lo heredan tal cual.
+-- Una limpieza posterior puede borrar la columna y el índice.
+--
+-- Idempotente: DROP NOT NULL sobre una columna que ya admite NULL no hace nada.
+ALTER TABLE catalogos.vehiculo ALTER COLUMN cliente_id DROP NOT NULL;
