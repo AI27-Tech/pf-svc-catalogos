@@ -23,7 +23,9 @@ import (
 	"time"
 
 	catclient "github.com/AI27-Tech/pf-pkg-contracts/packages/api-client-go/catalogos"
+	"github.com/AI27-Tech/pf-pkg-platform-go/bus"
 	platformerrors "github.com/AI27-Tech/pf-pkg-platform-go/errors"
+	"github.com/AI27-Tech/pf-pkg-platform-go/outbox"
 	"github.com/AI27-Tech/pf-pkg-platform-go/pgxpool"
 	"github.com/AI27-Tech/pf-pkg-platform-go/worker"
 	"github.com/AI27-Tech/pf-svc-catalogos/internal/clientes"
@@ -51,6 +53,10 @@ type Deps struct {
 	// sesión puntual en modo degradado (ADR 26 §4–§5). Puede ser nil en el
 	// esqueleto; entonces la autorización corre sin proyección de tombstones.
 	Revocacion RevocacionPort
+	// BusPublisher es el publicador del bus por el que el relay drena
+	// catalogos.outbox (catalogo.actualizado, ADR 29). Con nil no hay relay
+	// (arranque standalone sin bus) y los avisos se quedan en la tabla.
+	BusPublisher bus.Publisher
 }
 
 // RevocacionPort es la arista restringida a identidad (solo dos operaciones,
@@ -88,12 +94,18 @@ type Module struct {
 	clientes  *clientes.RepositorioCliente
 	sla       *sla.Repositorio
 	gps       *gps.Repositorio
+	relay     worker.Worker // nil sin BusPublisher
 }
 
 // New construye el módulo con sus pools y puertos ya resueltos. No lee entorno
 // (00 regla 4): la raíz le pasa todo construido.
 func New(p Pools, d Deps) (*Module, error) {
+	var relay worker.Worker
+	if d.BusPublisher != nil {
+		relay = outbox.NewRelay("outbox-relay:catalogos", p.Catalogos, d.BusPublisher, outbox.RelayOpciones{})
+	}
 	return &Module{
+		relay:     relay,
 		pools:     p,
 		deps:      d,
 		vehiculos: vehiculos.NewRepositorio(p.Catalogos),
@@ -650,16 +662,16 @@ func codigoDe(c platformerrors.Category) string {
 	}
 }
 
-// Workers devuelve los workers embebidos del módulo (ADR 29 §6). catalogos
-// tiene al menos dos: el relay de su outbox y el consumidor de sesion.revocada
-// (DEC-057/058). La raíz decide arrancarlos.
-//
-// Scaffolding: hoy devuelve una lista vacía. El relay se cablea cuando exista el
-// adaptador de bus que la raíz inyecte (bus/memory en desarrollo; broker real en
-// espera de ADR 32); el consumidor de sesion.revocada, cuando el evento esté en
-// la versión fijada del contrato y la arista a identidad esté resuelta.
+// Workers devuelve los workers embebidos del módulo (ADR 29 §6). La raíz decide
+// arrancarlos. Hoy es el relay de su outbox, que publica catalogo.actualizado
+// para que operacion invalide su caché de aptitud (DT-22); sin BusPublisher
+// la lista va vacía. Falta el consumidor de sesion.revocada (DEC-057/058), que
+// llega cuando la arista a identidad esté resuelta.
 func (m *Module) Workers() []worker.Worker {
-	return nil
+	if m.relay == nil {
+		return nil
+	}
+	return []worker.Worker{m.relay}
 }
 
 // Consultas expone los casos de uso que otros módulos consumen en proceso
