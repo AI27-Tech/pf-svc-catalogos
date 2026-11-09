@@ -664,7 +664,7 @@ func codigoDe(c platformerrors.Category) string {
 
 // Workers devuelve los workers embebidos del módulo (ADR 29 §6). La raíz decide
 // arrancarlos. Hoy es el relay de su outbox, que publica catalogo.actualizado
-// para que operacion y mensajeria invaliden su caché (DT-22); sin BusPublisher
+// para que operacion invalide su caché de aptitud (DT-22); sin BusPublisher
 // la lista va vacía. Falta el consumidor de sesion.revocada (DEC-057/058), que
 // llega cuando la arista a identidad esté resuelta.
 func (m *Module) Workers() []worker.Worker {

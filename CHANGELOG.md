@@ -2,7 +2,7 @@
 
 ## 2026:11:09 16:40 — El relay de outbox publica `catalogo.actualizado` (DT-22)
 
-**Para quién:** `pf-svc-core`, y a través del bus `operacion` y `mensajeria`. Cada alta o cambio de catálogo dejaba `catalogo.actualizado` en `catalogos.outbox`, pero nadie lo publicaba: `Workers()` devolvía una lista vacía. Por eso la caché de aptitud de operacion y la de clientes de mensajeria no se invalidaban con el cambio, sino al vencer su TTL de 30 s, y la tabla crecía sin drenarse. Para quien mantiene el servicio: sin migración; la raíz debe pasar el bus.
+**Para quién:** `pf-svc-core`, y a través del bus `operacion`. Cada alta o cambio de catálogo dejaba `catalogo.actualizado` en `catalogos.outbox`, pero nadie lo publicaba: `Workers()` devolvía una lista vacía. Por eso la caché de aptitud de operacion no se invalidaba con el cambio, sino al vencer su TTL de 30 s, y la tabla crecía sin drenarse. (mensajeria también consume el evento en standalone; dentro de core no tiene arista a catalogos en V1.) Para quien mantiene el servicio: sin migración; la raíz debe pasar el bus.
 
 **Resumen:** `catalogos.Deps` recibe `BusPublisher`. Con él, `New` arma el relay `outbox-relay:catalogos` (el mismo `outbox.NewRelay` de identidad) y `Workers()` lo devuelve. Sin él, nada cambia: no hay workers y el arranque standalone sigue igual.
 
