@@ -11,7 +11,6 @@ import (
 	"github.com/AI27-Tech/pf-svc-catalogos/internal/dbtest"
 	"github.com/AI27-Tech/pf-svc-catalogos/internal/vehiculos"
 	"github.com/AI27-Tech/pf-svc-catalogos/migrations"
-	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -89,13 +88,11 @@ func TestCrear_EmiteEventoEnLaMismaTx(t *testing.T) {
 	repo, teardown := setup(t, ctx)
 	defer teardown()
 
-	cliente := uuid.New()
 	v, err := repo.Crear(ctx, catclient.VehiculoEntrada{
 		Tipo:      catclient.Coche,
 		Estado:    catclient.Activa,
-		ClienteId: cliente,
 		Economico: str("ECO-1"),
-	}, cliente)
+	})
 	if err != nil {
 		t.Fatalf("Crear: %v", err)
 	}
@@ -116,10 +113,9 @@ func TestActualizar_CreaNuevaVersionSinSobrescribir(t *testing.T) {
 	repo, teardown := setup(t, ctx)
 	defer teardown()
 
-	cliente := uuid.New()
 	v1, err := repo.Crear(ctx, catclient.VehiculoEntrada{
-		Tipo: catclient.Coche, Estado: catclient.Activa, ClienteId: cliente, Placas: str("AAA-111"),
-	}, cliente)
+		Tipo: catclient.Coche, Estado: catclient.Activa, Placas: str("AAA-111"),
+	})
 	if err != nil {
 		t.Fatalf("Crear: %v", err)
 	}
@@ -173,11 +169,10 @@ func TestListarPorLote(t *testing.T) {
 	repo, teardown := setup(t, ctx)
 	defer teardown()
 
-	cliente := uuid.New()
 	nueva := func() catclient.Id {
 		v, err := repo.Crear(ctx, catclient.VehiculoEntrada{
-			Tipo: catclient.Moto, Estado: catclient.Activa, ClienteId: cliente,
-		}, cliente)
+			Tipo: catclient.Moto, Estado: catclient.Activa,
+		})
 		if err != nil {
 			t.Fatalf("Crear: %v", err)
 		}

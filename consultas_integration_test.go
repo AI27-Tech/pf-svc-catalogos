@@ -2,6 +2,7 @@ package catalogos_test
 
 import (
 	"context"
+	"encoding/json"
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
@@ -188,5 +189,118 @@ func TestConsultasObtenerCliente(t *testing.T) {
 		if rec.Code != tc.status || !strings.Contains(rec.Body.String(), tc.cuerpo) {
 			t.Errorf("GET %s: status %d cuerpo %s; quiere %d con %q", tc.ruta, rec.Code, rec.Body, tc.status, tc.cuerpo)
 		}
+	}
+}
+
+// clienteDeVehiculo lee el cliente_id de la versión vigente del vehículo; nil si
+// es NULL. Va por admin: el contrato no expone cliente_id en Vehiculo.
+func clienteDeVehiculo(t *testing.T, ctx context.Context, admin *pgx.Conn, id string) *uuid.UUID {
+	t.Helper()
+	var c *uuid.UUID
+	if err := admin.QueryRow(ctx, `SELECT cliente_id FROM catalogos.vehiculo WHERE id = $1 AND vigente_hasta IS NULL`, id).Scan(&c); err != nil {
+		t.Fatalf("leer cliente_id de %s: %v", id, err)
+	}
+	return c
+}
+
+// TestCrearVehiculo_FlotaSinCliente (DEC-143 #2): el alta por POST guarda el
+// vehículo sin cliente, traiga o no `cliente_id` el cuerpo.
+func TestCrearVehiculo_FlotaSinCliente(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	m := moduloConCatalogos(t, ctx)
+	admin, closeAdmin := dbtest.AdminConn(t, ctx)
+	defer closeAdmin()
+	mux := http.NewServeMux()
+	m.Routes(mux)
+
+	for _, cuerpo := range []string{
+		`{"tipo":"coche","estado":"activa","economico":"P-101","cliente_id":"00000000-0000-0000-0000-0000000000c1"}`,
+		`{"tipo":"moto","estado":"activa","economico":"M-7"}`,
+	} {
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/v1/vehiculos", strings.NewReader(cuerpo)))
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("POST %s: status %d cuerpo %s; quiere 201", cuerpo, rec.Code, rec.Body)
+		}
+		var v catclient.Vehiculo
+		if err := json.Unmarshal(rec.Body.Bytes(), &v); err != nil {
+			t.Fatalf("decodificar respuesta: %v", err)
+		}
+		if c := clienteDeVehiculo(t, ctx, admin, v.Id.String()); c != nil {
+			t.Errorf("POST %s: cliente_id = %s; quiere NULL (la flota es de AI27)", cuerpo, c)
+		}
+	}
+}
+
+// TestActualizarVehiculo_ConservaCliente (DEC-143 #2): la nueva versión hereda
+// el cliente_id de la anterior tal cual, sin inventarlo: NULL sigue NULL y el
+// dato heredado de antes de DEC-143 se conserva.
+func TestActualizarVehiculo_ConservaCliente(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	m := moduloConCatalogos(t, ctx)
+	admin, closeAdmin := dbtest.AdminConn(t, ctx)
+	defer closeAdmin()
+	const heredado = "00000000-0000-0000-0000-0000000000c1"
+	dbtest.Exec(t, ctx, admin, `INSERT INTO catalogos.vehiculo (id, version, tipo, estado, cliente_id) VALUES
+		('00000000-0000-0000-0000-0000000000b1', 1, 'coche', 'activa', '`+heredado+`'),
+		('00000000-0000-0000-0000-0000000000b2', 1, 'coche', 'activa', NULL)`)
+
+	placas := "XYZ-1"
+	for id, quiere := range map[string]string{
+		"00000000-0000-0000-0000-0000000000b1": heredado,
+		"00000000-0000-0000-0000-0000000000b2": "",
+	} {
+		v, err := m.Comandos().ActualizarVehiculo(ctx, uuid.MustParse(id), catclient.VehiculoCambios{Placas: &placas})
+		if err != nil {
+			t.Fatalf("ActualizarVehiculo(%s): %v", id, err)
+		}
+		if v.Version == nil || *v.Version != 2 {
+			t.Fatalf("%s: version %v; quiere 2", id, v.Version)
+		}
+		got := ""
+		if c := clienteDeVehiculo(t, ctx, admin, id); c != nil {
+			got = c.String()
+		}
+		if got != quiere {
+			t.Errorf("%s: cliente_id = %q; quiere %q", id, got, quiere)
+		}
+	}
+}
+
+// TestAptitudVehiculo_SinPertenencia (DEC-143 #3): la aptitud se evalúa por el
+// vehículo mismo. Uno activo es apto para viajes de dos clientes distintos, uno
+// inactivo no lo es para ninguno, y uno inexistente sigue siendo NoEncontrado.
+func TestAptitudVehiculo_SinPertenencia(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	m := moduloConCatalogos(t, ctx)
+	clienteA := uuid.MustParse("00000000-0000-0000-0000-0000000000c1")
+	clienteB := uuid.MustParse("00000000-0000-0000-0000-0000000000c2")
+
+	crear := func(estado catclient.VehiculoEntradaEstado) catclient.Id {
+		v, err := m.Comandos().CrearVehiculo(ctx, catclient.VehiculoEntrada{Tipo: catclient.Coche, Estado: estado})
+		if err != nil {
+			t.Fatalf("CrearVehiculo(%s): %v", estado, err)
+		}
+		return v.Id
+	}
+	activo, inactivo := crear(catclient.Activa), crear(catclient.Inactiva)
+
+	for _, cliente := range []catclient.Id{clienteA, clienteB} {
+		ap, err := m.Consultas().AptitudVehiculo(ctx, activo, cliente)
+		if err != nil || !ap.Apto {
+			t.Errorf("activo, cliente %s: aptitud %+v err %v; quiere apto", cliente, ap, err)
+		}
+		ap, err = m.Consultas().AptitudVehiculo(ctx, inactivo, cliente)
+		if err != nil || ap.Apto || ap.Motivos == nil || len(*ap.Motivos) != 1 || (*ap.Motivos)[0] != "vehículo inactivo" {
+			t.Errorf("inactivo, cliente %s: aptitud %+v err %v; quiere no apto por \"vehículo inactivo\"", cliente, ap, err)
+		}
+	}
+
+	_, err := m.Consultas().AptitudVehiculo(ctx, uuid.MustParse("00000000-0000-0000-0000-0000000000b9"), clienteA)
+	if got := platformerrors.AsCategory(err); got != platformerrors.CategoryNoEncontrado {
+		t.Fatalf("inexistente: categoría %v (err %v); quiere NoEncontrado", got, err)
 	}
 }
