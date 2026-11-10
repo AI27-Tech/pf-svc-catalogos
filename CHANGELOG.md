@@ -1,5 +1,30 @@
 # CHANGELOG
 
+## 2026:11:10 13:42 — Alta y edición de la organización cliente (tracer.40, E8-T19)
+
+**Para quién:** el `bff`, que orquesta el alta de una organización en `catalogos` y en `identidad` con el mismo id (DEC-144 #2), y `pf-svc-core`, que cablea la fachada en proceso. Hasta hoy `catalogos.cliente` solo se llenaba por SQL y no guardaba contacto. Para quien mantiene el servicio: una migración aditiva, dos rutas nuevas y el pin de contratos en `tracer.40`.
+
+**Resumen:** implementa `crearCliente` (`PUT /api/v1/clientes/{id}`) y `actualizarCliente` (`PATCH /api/v1/clientes/{id}`) de `catalogos.yaml` `v0.1.0-tracer.40`. `Cliente` devuelve `correo` y `telefono` cuando existen.
+
+**Comportamiento:**
+- `PUT` crea el cliente `activo` con el id de la ruta y emite `catalogo.actualizado` (`entidad` `cliente`, versión 1) en la misma tx (P17): 201. Si el id ya existe, en cualquier versión, no lo modifica ni emite evento: 200 con el cliente guardado. Dos altas simultáneas con el mismo id dejan un solo cliente y un solo evento (`ON CONFLICT DO NOTHING` sobre la PK).
+- Nombre, correo y teléfono son obligatorios y no vacíos; el correo debe contener `@` (DEC-139 #2). Si no, 400 `validacion`. Un id que no es uuid también es 400.
+- `PATCH` crea una versión nueva con los campos presentes y cierra la anterior (P8), y emite `catalogo.actualizado` con la versión nueva. Igual que vehículos y custodios, un PATCH sin cambio efectivo también versiona. `estado` acepta `activo` e `inactivo`; reactivar no se bloquea aquí, porque la terminalidad la aplica el `bff` (DEC-139 #4). Cliente inexistente: 404.
+- `obtenerCliente` y `listarClientes` devuelven `correo` y `telefono`; un cliente previo a tracer.40 los omite.
+
+**Cambios:**
+- `migrations/catalogos/0012_cliente_contacto.sql` (nuevo): `correo` y `telefono` TEXT nulos en `catalogos.cliente`. Sin grants nuevos: los de 0002 son de tabla para SELECT/INSERT y el UPDATE sigue limitado a `vigente_hasta`.
+- `internal/clientes/cliente.go`: `RepositorioCliente.Crear`, `Actualizar`, `ErrClienteInvalido` y la validación; el repositorio recibe `ComandosCliente` (con `Begin`) y publica en la outbox; lecturas con contacto.
+- `catalogos.go`: `ComandosAPI.CrearCliente` y `ActualizarCliente`, rutas `PUT` y `PATCH /api/v1/clientes/{id}`.
+- `go.mod`/`go.sum`: `api-client-go` de `tracer.37` a `tracer.40`. Por git-workflow §8, `catclient.Activo` pasa a `ValorCatalogoEntradaEstadoActivo` en `internal/tipos/tipos_integracion_test.go` y `consultas_integration_test.go`.
+- Pruebas (`clientes_integration_test.go`, nuevo): alta 201 y repetida 200 sin cambios, carrera de 8 altas, validación (correo sin `@`, campos vacíos o ausentes, id inválido), PATCH que versiona y emite, desactivar, lectura con contacto. `grants_integration_test.go` comprueba que `correo` no se reescribe en una versión.
+
+**Verificado:** `gofmt`, `go vet ./...`, `go build ./...`, `go build ./cmd/api` y `arch-test@v0.1.1` limpios. `go test -count=1 -p 1 ./...` en verde contra Postgres real (`CATALOGOS_TEST_DB`, sin pruebas saltadas). Cada prueba nueva falla al quitar su regla (mutaciones: sin `ON CONFLICT`, sin regla `@`, sin vacíos, sin evento en PATCH, sin cierre de vigencia, sin contacto en la lectura, siempre 200).
+
+**Archivos modificados:**
+- `migrations/catalogos/0012_cliente_contacto.sql`, `internal/clientes/cliente.go`, `internal/clientes/doc.go`, `internal/clientes/cliente_integracion_test.go`, `catalogos.go`, `clientes_integration_test.go`, `consultas_integration_test.go`, `internal/tipos/tipos_integracion_test.go`, `migrations/grants_integration_test.go`, `go.mod`, `go.sum`
+- `CHANGELOG.md`
+
 ## 2026:11:09 16:40 — El relay de outbox publica `catalogo.actualizado` (DT-22)
 
 **Para quién:** `pf-svc-core`, y a través del bus `operacion`. Cada alta o cambio de catálogo dejaba `catalogo.actualizado` en `catalogos.outbox`, pero nadie lo publicaba: `Workers()` devolvía una lista vacía. Por eso la caché de aptitud de operacion no se invalidaba con el cambio, sino al vencer su TTL de 30 s, y la tabla crecía sin drenarse. (mensajeria también consume el evento en standalone; dentro de core no tiene arista a catalogos en V1.) Para quien mantiene el servicio: sin migración; la raíz debe pasar el bus.

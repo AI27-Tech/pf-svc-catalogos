@@ -122,8 +122,9 @@ func New(p Pools, d Deps) (*Module, error) {
 // monta las operaciones presentes en la versión fijada de catalogos.yaml
 // (contrato primero, 00 regla 6). Hoy monta vehículos (E5-T1), custodios
 // (E5-T2), catálogos de tipo (E5-T3) y contratos/SLA (E5-T4), todas cerradas en
-// tracer.8. También monta el listado de clientes (selector, E8-T11) y la lectura
-// de un cliente por id (detalle de emergencia de Reacción).
+// tracer.8. También monta el listado de clientes (selector, E8-T11), la lectura
+// de un cliente por id (detalle de emergencia de Reacción) y el alta y la edición
+// de la organización cliente (E8-T19, tracer.40).
 func (m *Module) Routes(mux *http.ServeMux) {
 	// Vehículos (superficie completa de E5-T1 sobre tracer.6). Los handlers
 	// delegan en los MISMOS casos de uso que Consultas()/Comandos() (I3): el
@@ -273,6 +274,51 @@ func (m *Module) Routes(mux *http.ServeMux) {
 			return
 		}
 		cl, err := q.ObtenerCliente(r.Context(), id)
+		if err != nil {
+			escribirError(w, err)
+			return
+		}
+		escribirJSON(w, http.StatusOK, cl)
+	})
+
+	// PUT /api/v1/clientes/{id} — alta idempotente por id (tracer.40, DEC-144 #2):
+	// 201 si se creó, 200 si ya existía (sin modificarlo).
+	mux.HandleFunc("PUT /api/v1/clientes/{id}", func(w http.ResponseWriter, r *http.Request) {
+		id, err := uuid.Parse(r.PathValue("id"))
+		if err != nil {
+			escribirError(w, platformerrors.NewValidacion("id de cliente inválido"))
+			return
+		}
+		var entrada catclient.ClienteEntrada
+		if err := json.NewDecoder(r.Body).Decode(&entrada); err != nil {
+			escribirError(w, platformerrors.NewValidacion("cuerpo inválido"))
+			return
+		}
+		cl, creado, err := cmd.CrearCliente(r.Context(), id, entrada)
+		if err != nil {
+			escribirError(w, err)
+			return
+		}
+		status := http.StatusOK
+		if creado {
+			status = http.StatusCreated
+		}
+		escribirJSON(w, status, cl)
+	})
+
+	// PATCH /api/v1/clientes/{id} — nueva versión (editar o desactivar).
+	mux.HandleFunc("PATCH /api/v1/clientes/{id}", func(w http.ResponseWriter, r *http.Request) {
+		id, err := uuid.Parse(r.PathValue("id"))
+		if err != nil {
+			escribirError(w, platformerrors.NewValidacion("id de cliente inválido"))
+			return
+		}
+		var cambios catclient.ClienteCambios
+		if err := json.NewDecoder(r.Body).Decode(&cambios); err != nil {
+			escribirError(w, platformerrors.NewValidacion("cuerpo inválido"))
+			return
+		}
+		cl, err := cmd.ActualizarCliente(r.Context(), id, cambios)
 		if err != nil {
 			escribirError(w, err)
 			return
@@ -777,6 +823,16 @@ type ComandosAPI interface {
 	// sobrescribir la anterior (P8): la versión previa sigue consultable con
 	// `?a_fecha`.
 	ActualizarSla(ctx context.Context, id catclient.Id, c catclient.SlaCambios) (*catclient.Sla, error)
+	// CrearCliente da de alta la organización cliente con el id de su tenant en
+	// identidad (DEC-144 #2), en estado activo. Idempotente por id: si ya existe
+	// devuelve el guardado sin modificarlo y creado=false (200); si no, creado=true
+	// (201). Nombre, correo (con `@`) y teléfono obligatorios (DEC-139 #2): si
+	// faltan, Validacion. No revisa rol: la guarda es del bff.
+	CrearCliente(ctx context.Context, id catclient.Id, e catclient.ClienteEntrada) (cl *catclient.Cliente, creado bool, err error)
+	// ActualizarCliente crea una nueva versión con los campos presentes (P8).
+	// Desactivar es estado inactivo. No bloquea reactivar: la terminalidad de la
+	// organización la aplica el bff (DEC-139 #4).
+	ActualizarCliente(ctx context.Context, id catclient.Id, c catclient.ClienteCambios) (*catclient.Cliente, error)
 }
 
 // Comandos expone la superficie de escritura administrativa.
@@ -1038,4 +1094,29 @@ func (c *comandos) ActualizarSla(ctx context.Context, id catclient.Id, cambios c
 		return nil, err
 	}
 	return &s, nil
+}
+
+func (c *comandos) CrearCliente(ctx context.Context, id catclient.Id, e catclient.ClienteEntrada) (*catclient.Cliente, bool, error) {
+	cl, creado, err := c.m.clientes.Crear(ctx, id, e)
+	if errors.Is(err, clientes.ErrClienteInvalido) {
+		return nil, false, platformerrors.NewValidacion("%s", err.Error())
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	return &cl, creado, nil
+}
+
+func (c *comandos) ActualizarCliente(ctx context.Context, id catclient.Id, cambios catclient.ClienteCambios) (*catclient.Cliente, error) {
+	cl, err := c.m.clientes.Actualizar(ctx, id, cambios, time.Now())
+	if errors.Is(err, clientes.ErrClienteInvalido) {
+		return nil, platformerrors.NewValidacion("%s", err.Error())
+	}
+	if errors.Is(err, clientes.ErrClienteNoEncontrado) {
+		return nil, platformerrors.NewNoEncontrado("cliente no encontrado")
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &cl, nil
 }
