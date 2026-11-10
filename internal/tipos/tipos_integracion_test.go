@@ -106,7 +106,7 @@ func TestCrear_EmiteEventoConSubtipo(t *testing.T) {
 	defer teardown()
 
 	v, err := repo.Crear(ctx, catclient.LineasTransporte, catclient.ValorCatalogoEntrada{
-		Codigo: "TRANSPORTES-SA", Etiqueta: "Transportes S.A.", Estado: catclient.Activo,
+		Codigo: "TRANSPORTES-SA", Etiqueta: "Transportes S.A.", Estado: catclient.ValorCatalogoEntradaEstadoActivo,
 	})
 	if err != nil {
 		t.Fatalf("Crear: %v", err)
@@ -134,7 +134,7 @@ func TestDesactivar_NoRompeLaHistoria(t *testing.T) {
 	defer teardown()
 
 	v1, err := repo.Crear(ctx, catclient.TiposServicio, catclient.ValorCatalogoEntrada{
-		Codigo: "CUSTODIA-ARMADA", Etiqueta: "Custodia armada", Estado: catclient.Activo,
+		Codigo: "CUSTODIA-ARMADA", Etiqueta: "Custodia armada", Estado: catclient.ValorCatalogoEntradaEstadoActivo,
 	})
 	if err != nil {
 		t.Fatalf("Crear: %v", err)
@@ -205,12 +205,12 @@ func TestListar_SoloElTipoPedido(t *testing.T) {
 	defer teardown()
 
 	if _, err := repo.Crear(ctx, catclient.TiposUnidad, catclient.ValorCatalogoEntrada{
-		Codigo: "PATRULLA", Etiqueta: "Patrulla", Estado: catclient.Activo,
+		Codigo: "PATRULLA", Etiqueta: "Patrulla", Estado: catclient.ValorCatalogoEntradaEstadoActivo,
 	}); err != nil {
 		t.Fatalf("Crear tipos_unidad: %v", err)
 	}
 	if _, err := repo.Crear(ctx, catclient.ZonasRiesgo, catclient.ValorCatalogoEntrada{
-		Codigo: "TRAMO-X", Etiqueta: "Tramo X", Estado: catclient.Activo,
+		Codigo: "TRAMO-X", Etiqueta: "Tramo X", Estado: catclient.ValorCatalogoEntradaEstadoActivo,
 	}); err != nil {
 		t.Fatalf("Crear zonas_riesgo: %v", err)
 	}
