@@ -100,6 +100,30 @@ func (r *RepositorioCliente) Listar(ctx context.Context, cursor *catclient.Curso
 	return catclient.PaginaClientes{Items: items, CursorSiguiente: siguiente}, nil
 }
 
+// ListarPorLote devuelve los clientes vigentes cuyos id están en ids, en un solo
+// viaje (C4), con el mismo criterio que vehículos y custodios: los ids sin
+// versión vigente se omiten y el orden no está garantizado (el consumidor
+// empareja por id). ACTIVOS o INACTIVOS, igual que Obtener: el lote compone el
+// nombre de organizaciones que ya existen (bff, mensajeria), no es el selector.
+func (r *RepositorioCliente) ListarPorLote(ctx context.Context, ids []catclient.Id) (catclient.PaginaClientes, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT `+columnasCliente+`
+		  FROM catalogos.cliente
+		 WHERE vigente_hasta IS NULL AND id = ANY($1)
+		 ORDER BY id`, ids)
+	if err != nil {
+		return catclient.PaginaClientes{}, fmt.Errorf("clientes: lote: %w", err)
+	}
+	defer rows.Close()
+
+	items, err := escanearClientes(rows)
+	if err != nil {
+		return catclient.PaginaClientes{}, err
+	}
+	// El lote no se pagina: cursor_siguiente es null (contrato).
+	return catclient.PaginaClientes{Items: items, CursorSiguiente: nil}, nil
+}
+
 // Obtener devuelve la versión vigente de un cliente, ACTIVO o INACTIVO: a
 // diferencia del selector, la lectura por id compone datos de un viaje que ya
 // existe (p. ej. el detalle de emergencia de Reacción), y un cliente dado de baja

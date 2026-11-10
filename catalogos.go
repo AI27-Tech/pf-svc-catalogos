@@ -247,14 +247,35 @@ func (m *Module) Routes(mux *http.ServeMux) {
 		escribirJSON(w, http.StatusOK, ap)
 	})
 
-	// --- Clientes (selector de cliente para crear un viaje por Operación, E8-T11).
-	// Solo lectura: GET /api/v1/clientes, paginado por cursor, solo clientes
-	// activos (DEC-101 #1). NO se proyecta ?ids (es la lectura por lote, no un
-	// selector); el alcance del jefe_operativo lo aplican bff/operacion
+	// --- Clientes. GET /api/v1/clientes: sin `ids`, el selector para crear un
+	// viaje por Operación (E8-T11), paginado por cursor y solo clientes activos
+	// (DEC-101 #1); con `ids`, la lectura por lote (C4, consumidores bff y
+	// mensajeria), mismo código que vehículos: `ids` y `cursor` son mutuamente
+	// excluyentes (400). El alcance del jefe_operativo lo aplican bff/operacion
 	// (DEC-101 #2), no catalogos.
 	mux.HandleFunc("GET /api/v1/clientes", func(w http.ResponseWriter, r *http.Request) {
+		idsRaw := r.URL.Query().Get("ids")
+		cursorRaw := r.URL.Query().Get("cursor")
+		if idsRaw != "" && cursorRaw != "" {
+			escribirError(w, platformerrors.NewValidacion("ids y cursor son mutuamente excluyentes"))
+			return
+		}
+		if idsRaw != "" {
+			ids, err := parsearIDs(idsRaw)
+			if err != nil {
+				escribirError(w, err)
+				return
+			}
+			pag, err := q.ListarClientesPorLote(r.Context(), ids)
+			if err != nil {
+				escribirError(w, err)
+				return
+			}
+			escribirJSON(w, http.StatusOK, pag)
+			return
+		}
 		var cursor *catclient.Cursor
-		if cursorRaw := r.URL.Query().Get("cursor"); cursorRaw != "" {
+		if cursorRaw != "" {
 			cursor = &cursorRaw
 		}
 		pag, err := q.ListarClientes(r.Context(), cursor)
@@ -746,6 +767,11 @@ type ConsultasAPI interface {
 	// Solo activos (DEC-101 #1); el filtro de alcance del jefe_operativo NO lo
 	// aplica catalogos (DEC-101 #2, lo aplican bff/operacion).
 	ListarClientes(ctx context.Context, cursor *catclient.Cursor) (*catclient.PaginaClientes, error)
+	// ListarClientesPorLote devuelve los clientes vigentes de ids, en un solo
+	// viaje (C4), con correo y teléfono. Activos o inactivos (compone nombres
+	// de organizaciones existentes, no es el selector); los ids sin versión
+	// vigente se omiten.
+	ListarClientesPorLote(ctx context.Context, ids []catclient.Id) (*catclient.PaginaClientes, error)
 	ObtenerContrato(ctx context.Context, id catclient.Id, aFecha *catclient.MarcaTiempo) (*catclient.Contrato, error)
 	ObtenerSla(ctx context.Context, id catclient.Id, aFecha *catclient.MarcaTiempo) (*catclient.Sla, error)
 	// ListarVehiculos devuelve una página de vehículos vigentes (paginación por
@@ -859,6 +885,14 @@ func (c *consultas) ObtenerCliente(ctx context.Context, id catclient.Id) (*catcl
 
 func (c *consultas) ListarClientes(ctx context.Context, cursor *catclient.Cursor) (*catclient.PaginaClientes, error) {
 	pag, err := c.m.clientes.Listar(ctx, cursor)
+	if err != nil {
+		return nil, err
+	}
+	return &pag, nil
+}
+
+func (c *consultas) ListarClientesPorLote(ctx context.Context, ids []catclient.Id) (*catclient.PaginaClientes, error) {
+	pag, err := c.m.clientes.ListarPorLote(ctx, ids)
 	if err != nil {
 		return nil, err
 	}

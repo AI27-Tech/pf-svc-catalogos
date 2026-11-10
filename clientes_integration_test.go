@@ -287,3 +287,86 @@ func TestLeerCliente_ConContacto(t *testing.T) {
 		t.Errorf("GET previo: status %d cuerpo %s; quiere 200 sin correo", status, cuerpo)
 	}
 }
+
+// rutaLote arma GET /api/v1/clientes?ids=... con los ids separados por coma.
+func rutaLote(ids ...string) string {
+	return "/api/v1/clientes?ids=" + strings.Join(ids, ",")
+}
+
+// TestListarClientesPorLote_OmiteInexistentes: con ?ids, un id existente y uno
+// inexistente devuelven solo el existente, en su versión vigente (una sola fila
+// aunque tenga dos versiones), sin otros clientes, y cursor_siguiente null.
+func TestListarClientesPorLote_OmiteInexistentes(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	m := moduloConCatalogos(t, ctx)
+	if _, _, err := m.Comandos().CrearCliente(ctx, idCliente, catclient.ClienteEntrada{Nombre: "Viejo", Correo: "a@b", Telefono: "1"}); err != nil {
+		t.Fatalf("CrearCliente: %v", err)
+	}
+	nombre := "Vigente"
+	if _, err := m.Comandos().ActualizarCliente(ctx, idCliente, catclient.ClienteCambios{Nombre: &nombre}); err != nil {
+		t.Fatalf("ActualizarCliente: %v", err)
+	}
+	// Un cliente activo que NO se pide: el listado lo traería, el lote no.
+	if _, _, err := m.Comandos().CrearCliente(ctx, uuid.MustParse("00000000-0000-0000-0000-0000000000e2"), catclient.ClienteEntrada{Nombre: "Ajeno", Correo: "x@y", Telefono: "2"}); err != nil {
+		t.Fatalf("CrearCliente ajeno: %v", err)
+	}
+	mux := http.NewServeMux()
+	m.Routes(mux)
+
+	status, cuerpo := pedir(t, mux, http.MethodGet, rutaLote(idCliente.String(), "00000000-0000-0000-0000-0000000000ff"), "")
+	if status != http.StatusOK {
+		t.Fatalf("lote: status %d cuerpo %s; quiere 200", status, cuerpo)
+	}
+	var pag catclient.PaginaClientes
+	if err := json.Unmarshal([]byte(cuerpo), &pag); err != nil {
+		t.Fatalf("decodificar: %v", err)
+	}
+	if len(pag.Items) != 1 || pag.Items[0].Id != idCliente || pag.Items[0].Nombre != "Vigente" || pag.CursorSiguiente != nil {
+		t.Fatalf("lote: %+v; quiere solo %s en su versión vigente y cursor_siguiente null", pag, idCliente)
+	}
+}
+
+// TestListarClientesPorLote_Validacion: ids y cursor juntos son 400 (contrato:
+// mutuamente excluyentes), igual que un id que no es UUID.
+func TestListarClientesPorLote_Validacion(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	m := moduloConCatalogos(t, ctx)
+	mux := http.NewServeMux()
+	m.Routes(mux)
+
+	for nombre, ruta := range map[string]string{
+		"ids y cursor": rutaLote(idCliente.String()) + "&cursor=" + idCliente.String(),
+		"id inválido":  rutaLote(idCliente.String(), "no-es-uuid"),
+	} {
+		if status, cuerpo := pedir(t, mux, http.MethodGet, ruta, ""); status != http.StatusBadRequest || !strings.Contains(cuerpo, `"codigo":"validacion"`) {
+			t.Errorf("%s: status %d cuerpo %s; quiere 400 validacion", nombre, status, cuerpo)
+		}
+	}
+}
+
+// TestListarClientesPorLote_ConContacto: el lote trae correo y teléfono, y a
+// diferencia del selector incluye clientes inactivos (compone el nombre de una
+// organización que ya existe, como la lectura por id).
+func TestListarClientesPorLote_ConContacto(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	m := moduloConCatalogos(t, ctx)
+	if _, _, err := m.Comandos().CrearCliente(ctx, idCliente, catclient.ClienteEntrada{Nombre: "N", Correo: "c@d.mx", Telefono: "5551234567"}); err != nil {
+		t.Fatalf("CrearCliente: %v", err)
+	}
+	inactivo := catclient.ClienteCambiosEstadoInactivo
+	if _, err := m.Comandos().ActualizarCliente(ctx, idCliente, catclient.ClienteCambios{Estado: &inactivo}); err != nil {
+		t.Fatalf("desactivar: %v", err)
+	}
+
+	pag, err := m.Consultas().ListarClientesPorLote(ctx, []catclient.Id{idCliente})
+	if err != nil || len(pag.Items) != 1 {
+		t.Fatalf("ListarClientesPorLote: %+v err %v; quiere 1", pag, err)
+	}
+	cl := pag.Items[0]
+	if cl.Estado != catclient.ClienteEstadoInactivo || cl.Correo == nil || *cl.Correo != "c@d.mx" || cl.Telefono == nil || *cl.Telefono != "5551234567" {
+		t.Errorf("lote: %+v; quiere inactivo con c@d.mx y 5551234567", cl)
+	}
+}

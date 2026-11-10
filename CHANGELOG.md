@@ -11,6 +11,7 @@
 - Nombre, correo y teléfono son obligatorios y no vacíos; el correo debe contener `@` (DEC-139 #2). Si no, 400 `validacion`. Un id que no es uuid también es 400.
 - `PATCH` crea una versión nueva con los campos presentes y cierra la anterior (P8), y emite `catalogo.actualizado` con la versión nueva. Igual que vehículos y custodios, un PATCH sin cambio efectivo también versiona. `estado` acepta `activo` e `inactivo`; reactivar no se bloquea aquí, porque la terminalidad la aplica el `bff` (DEC-139 #4). Cliente inexistente: 404.
 - `obtenerCliente` y `listarClientes` devuelven `correo` y `telefono`; un cliente previo a tracer.40 los omite.
+- `listarClientes` con `ids` es la lectura por lote (C4), con el mismo código que vehículos y custodios: versión vigente, los ids sin versión vigente se omiten, `cursor_siguiente` null, con contacto. Incluye clientes inactivos (el bff y mensajeria componen nombres de organizaciones que ya existen; el selector sin `ids` sigue solo con activos). `ids` + `cursor` o un id que no es uuid: 400 `validacion`. Nuevo `ConsultasAPI.ListarClientesPorLote`; sin límite de tamaño, igual que los otros lotes.
 
 **Cambios:**
 - `migrations/catalogos/0012_cliente_contacto.sql` (nuevo): `correo` y `telefono` TEXT nulos en `catalogos.cliente`. Sin grants nuevos: los de 0002 son de tabla para SELECT/INSERT y el UPDATE sigue limitado a `vigente_hasta`.
