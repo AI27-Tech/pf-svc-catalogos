@@ -55,7 +55,8 @@ func setupClientes(t *testing.T, ctx context.Context) (*clientes.RepositorioClie
 }
 
 // insertarCliente da de alta un cliente en su versión vigente con el estado dado.
-// No hay caso de uso de alta (brecha C7); el test inserta directo con el pool.
+// El alta del repositorio siempre crea `activo`; el test inserta directo para fijar
+// el estado sin pasar por una edición.
 func insertarCliente(t *testing.T, ctx context.Context, pool *pgxpool.Pool, id uuid.UUID, nombre, estado string) {
 	t.Helper()
 	_, err := pool.Exec(ctx,

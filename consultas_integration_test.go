@@ -37,7 +37,7 @@ func TestConsultasListarTiposServicio(t *testing.T) {
 		catclient.LineasTransporte: "LINEA-NORTE",
 	} {
 		if _, err := m.Comandos().CrearValorCatalogo(ctx, tipo, catclient.ValorCatalogoEntrada{
-			Codigo: codigo, Etiqueta: codigo, Estado: catclient.Activo,
+			Codigo: codigo, Etiqueta: codigo, Estado: catclient.ValorCatalogoEntradaEstadoActivo,
 		}); err != nil {
 			t.Fatalf("crear %s/%s: %v", tipo, codigo, err)
 		}

@@ -150,6 +150,8 @@ func TestGrants(t *testing.T) {
 			"no se borra en firme una versión (P8)"},
 		{`UPDATE catalogos.cliente SET nombre = 'otro'`, "permission denied for table cliente",
 			"no se reescribe una versión: solo se cierra su vigencia (P8)"},
+		{`UPDATE catalogos.cliente SET correo = 'otro@x'`, "permission denied for table cliente",
+			"el contacto de 0012 tampoco se reescribe en una versión (P8)"},
 		{`DELETE FROM catalogos.contrato`, "permission denied for table contrato", "no se borra un contrato"},
 		{`DELETE FROM catalogos.sla`, "permission denied for table sla", "no se borra un SLA"},
 		{`DELETE FROM catalogos.custodio`, "permission denied for table custodio", "no se borra un custodio"},
